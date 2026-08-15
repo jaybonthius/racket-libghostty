@@ -7,10 +7,27 @@
   (define terminal (make-terminal columns rows))
   (dynamic-wind void (lambda () (procedure terminal)) (lambda () (terminal-close! terminal))))
 
-(define (captured-exception procedure)
-  (with-handlers ([exn? values])
+(struct captured-raise (value) #:transparent)
+
+(define (capture-outcome procedure)
+  (with-handlers ([(lambda (_value) #t) captured-raise])
     (procedure)
-    #f))
+    'returned))
+
+(define (capture-raised procedure)
+  (define outcome (capture-outcome procedure))
+  (when (eq? outcome 'returned)
+    (error 'capture-raised "procedure returned instead of raising"))
+  outcome)
+
+(define (captured-exception procedure)
+  (captured-raise-value (capture-raised procedure)))
+
+(define (sync-required who event [timeout 5])
+  (define result (sync/timeout timeout event))
+  (unless result
+    (error who "operation did not finish within ~a seconds" timeout))
+  result)
 
 (test-case "PTY writes and bells preserve order, multiplicity, replacement, and clearing"
   (call-with-terminal
@@ -287,7 +304,41 @@
      (terminal-write! terminal #"usable")
      (check-equal? (terminal->plain-text terminal) "usable"))))
 
-(test-case "same-terminal reentrancy fails immediately while another terminal remains usable"
+(test-case "all raised values use fallback, first identity, cleanup, and no stale state"
+  (call-with-terminal
+   80
+   24
+   (lambda (terminal)
+     (define replies '())
+     (terminal-set-pty-write-handler! terminal (lambda (bytes) (set! replies (cons bytes replies))))
+     (define token (box 'arbitrary-raised-value))
+     (terminal-set-size-handler! terminal (lambda () (raise token)))
+     (check-eq? (captured-raise-value (capture-raised (lambda ()
+                                                        (terminal-write! terminal #"\33[14t"))))
+                token)
+     (check-equal? replies '())
+     (define later-token (box 'later))
+     (define bell-count 0)
+     (terminal-set-bell-handler! terminal
+                                 (lambda ()
+                                   (set! bell-count (add1 bell-count))
+                                   (raise (if (= bell-count 1) token later-token))))
+     (check-eq? (captured-raise-value (capture-raised (lambda () (terminal-write! terminal #"\a\a"))))
+                token)
+     (check-equal? bell-count 2)
+     (terminal-set-enquiry-handler! terminal (lambda () #"operation-owned"))
+     (terminal-set-bell-handler! terminal (lambda () (raise #f)))
+     (define false-raise (capture-raised (lambda () (terminal-write! terminal #"\5\a"))))
+     (check-true (captured-raise? false-raise))
+     (check-false (captured-raise-value false-raise))
+     (check-equal? replies (list #"operation-owned"))
+     (terminal-set-bell-handler! terminal #f)
+     (terminal-set-enquiry-handler! terminal #f)
+     (terminal-set-size-handler! terminal #f)
+     (terminal-write! terminal #"later")
+     (check-equal? (terminal->plain-text terminal) "later"))))
+
+(test-case "same-terminal fails and an uncontended different terminal succeeds"
   (define first (make-terminal 20 2))
   (define second (make-terminal 20 2))
   (dynamic-wind void
@@ -306,3 +357,68 @@
                 (lambda ()
                   (terminal-close! first)
                   (terminal-close! second))))
+
+(test-case "nested A to B to A callback cycle fails without blocking"
+  (define first (make-terminal 20 2))
+  (define second (make-terminal 20 2))
+  (dynamic-wind
+   void
+   (lambda ()
+     (terminal-set-bell-handler! first (lambda () (terminal-write! second #"\a")))
+     (terminal-set-bell-handler! second (lambda () (terminal-write! first #"cycle")))
+     (define result (make-channel))
+     (define worker
+       (thread (lambda ()
+                 (channel-put result (capture-raised (lambda () (terminal-write! first #"\a")))))))
+     (define outcome (sync/timeout 5 result))
+     (unless outcome
+       (kill-thread worker)
+       (error 'nested-callback-cycle "operation timed out"))
+     (define raised (captured-raise-value outcome))
+     (check-true (exn:fail:contract? raised))
+     (check-regexp-match #rx"terminal lock is unavailable" (exn-message raised))
+     (check-not-false (sync-required 'nested-callback-cycle (thread-dead-evt worker))))
+   (lambda ()
+     (terminal-close! first)
+     (terminal-close! second))))
+
+(test-case "bounded public two-thread lock-inversion stress does not block"
+  (define first (make-terminal 20 2))
+  (define second (make-terminal 20 2))
+  (define starts (list (make-semaphore 0) (make-semaphore 0)))
+  (define results (make-channel))
+  (define workers '())
+  (define rounds 200)
+  (define (cross-terminal-handler other)
+    (lambda () (terminal-write! other #"cross")))
+  (dynamic-wind
+   void
+   (lambda ()
+     (terminal-set-bell-handler! first (cross-terminal-handler second))
+     (terminal-set-bell-handler! second (cross-terminal-handler first))
+     (set! workers
+           (for/list ([terminal (in-list (list first second))]
+                      [start (in-list starts)])
+             (thread (lambda ()
+                       (for ([_round (in-range rounds)])
+                         (semaphore-wait start)
+                         (channel-put results
+                                      (capture-outcome (lambda ()
+                                                         (terminal-write! terminal #"\a")))))))))
+     (for ([_round (in-range rounds)])
+       (for ([start (in-list starts)])
+         (semaphore-post start))
+       (for ([_worker (in-range 2)])
+         (define outcome (sync-required 'two-thread-lock-inversion results))
+         (unless (eq? outcome 'returned)
+           (define raised (captured-raise-value outcome))
+           (check-true (exn:fail:contract? raised))
+           (check-regexp-match #rx"terminal lock is unavailable" (exn-message raised)))))
+     (for ([worker (in-list workers)])
+       (check-not-false (sync-required 'two-thread-lock-inversion (thread-dead-evt worker)))))
+   (lambda ()
+     (for ([worker (in-list workers)]
+           #:unless (thread-dead? worker))
+       (kill-thread worker))
+     (terminal-close! first)
+     (terminal-close! second))))

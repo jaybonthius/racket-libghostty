@@ -1,6 +1,6 @@
 # libghostty browser terminal
 
-This Linux x86-64 example package demonstrates milestones 0–4 without adding web dependencies to `libghostty`. It requires `libutil` and `/usr/bin/setsid`.
+This Linux x86-64 example package demonstrates milestones 0–5 without adding web dependencies to `libghostty`. It requires `libutil` and `/usr/bin/setsid`.
 
 From the repository root:
 
@@ -15,4 +15,6 @@ Every viewport patch is an xexpr built from `terminal-render-snapshot`. It carri
 
 A minimal browser adapter sends ordered key, resize, paste, pointer, and wheel facts to one server-owned session. Under serialized session state, the server maps facts, synchronizes encoders from current terminal modes, encodes native PTY bytes, updates PTY and terminal geometry, and decides wheel routing. The adapter contains no escape sequences, terminal modes, paste framing, coordinate clamping, scroll policy, screen model, or optimistic state.
 
-The example deliberately has no long-lived shell, effects, callbacks, authentication, persistence, reconnect state, multiple sessions, local scrollback model, or production hardening. Those capabilities belong to later milestones.
+Milestone 5 registers public PTY-write and bell handlers. The synchronous callbacks only copy and enqueue facts: PTY replies remain deferred until the native terminal write returns, when the serialized session drains them back to the PTY and records a bounded reply projection; bells are likewise drained into a server-owned count exposed by normal SSE patches. The bounded shell workflow issues a real DECRQM query, verifies the callback reply through its controlling PTY, emits BEL, and then publishes its marker. Callbacks never perform HTTP work, emit SSE patches, or own authoritative web/session behavior.
+
+The example deliberately has no long-lived shell, authentication, persistence, reconnect state, multiple sessions, local scrollback model, or production hardening. Those capabilities belong to later milestones.

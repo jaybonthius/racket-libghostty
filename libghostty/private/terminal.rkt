@@ -49,7 +49,8 @@
 (struct desktop-notification (title body) #:transparent)
 (struct progress-report (state progress) #:transparent)
 (struct unknown-sequence (tag content truncated?) #:transparent)
-(struct terminal-operation (exception allocations) #:authentic)
+(struct raised-value (value) #:authentic)
+(struct terminal-operation (raised allocations) #:authentic)
 
 (define current-callback-terminal (make-parameter #f))
 (define current-terminal-operation (make-parameter #f))
@@ -60,6 +61,21 @@
                            "same-terminal calls are not allowed from a terminal effect handler"
                            "terminal"
                            value)))
+
+(define (call-with-terminal-lock who value procedure)
+  (define callback-terminal (current-callback-terminal))
+  (cond
+    [callback-terminal
+     (check-callback-reentrancy who value)
+     (call-with-semaphore (terminal-lock value)
+                          procedure
+                          (lambda ()
+                            (raise-arguments-error
+                             who
+                             "terminal lock is unavailable during a terminal effect handler"
+                             "terminal"
+                             value)))]
+    [else (call-with-semaphore (terminal-lock value) procedure)]))
 
 (define (release-terminal! value)
   (define pointer-box (terminal-pointer value))
@@ -126,9 +142,9 @@
     value))
 
 (define (call-with-terminal-pointer who value procedure)
-  (check-callback-reentrancy who value)
-  (call-with-semaphore
-   (terminal-lock value)
+  (call-with-terminal-lock
+   who
+   value
    (lambda ()
      (define pointer (unbox (terminal-pointer value)))
      (unless pointer
@@ -140,8 +156,7 @@
   (not (unbox (terminal-pointer value))))
 
 (define (terminal-close! value)
-  (check-callback-reentrancy 'terminal-close! value)
-  (call-with-semaphore (terminal-lock value) (lambda () (release-terminal! value)))
+  (call-with-terminal-lock 'terminal-close! value (lambda () (release-terminal! value)))
   (void))
 
 (define (terminal-reset! value)
@@ -150,9 +165,9 @@
                               (lambda (pointer) (ghostty-terminal-reset pointer)))
   (void))
 
-(define (record-handler-exception! operation error)
-  (when (and operation (not (unbox (terminal-operation-exception operation))))
-    (set-box! (terminal-operation-exception operation) error)))
+(define (record-handler-raise! operation value)
+  (when (and operation (not (unbox (terminal-operation-raised operation))))
+    (set-box! (terminal-operation-raised operation) (raised-value value))))
 
 (define (free-operation-allocations! operation)
   (for ([pointer (in-list (unbox (terminal-operation-allocations operation)))])
@@ -165,17 +180,18 @@
    value
    (lambda (pointer)
      (define operation (terminal-operation (box #f) (box '())))
-     (define native-exception #f)
+     (define native-raised #f)
      (dynamic-wind void
                    (lambda ()
                      (parameterize ([current-terminal-operation operation])
-                       (with-handlers ([exn? (lambda (error) (set! native-exception error))])
+                       (with-handlers ([(lambda (_value) #t)
+                                        (lambda (raised) (set! native-raised (raised-value raised)))])
                          (procedure pointer))))
                    (lambda () (free-operation-allocations! operation)))
-     (define handler-exception (unbox (terminal-operation-exception operation)))
+     (define handler-raised (unbox (terminal-operation-raised operation)))
      (cond
-       [handler-exception (raise handler-exception)]
-       [native-exception (raise native-exception)]
+       [handler-raised (raise (raised-value-value handler-raised))]
+       [native-raised (raise (raised-value-value native-raised))]
        [else (void)]))))
 
 (define (terminal-resize! value
@@ -210,9 +226,10 @@
 
 (define (call-effect-handler value fallback procedure)
   (parameterize ([current-callback-terminal value])
-    (with-handlers ([exn? (lambda (error)
-                            (record-handler-exception! (current-terminal-operation) error)
-                            (fallback))])
+    (with-handlers ([(lambda (_value) #t) (lambda (raised)
+                                            (record-handler-raise! (current-terminal-operation)
+                                                                   raised)
+                                            (fallback))])
       (procedure))))
 
 (define (set-effect-handler! who value key handler make-callback native-set)
