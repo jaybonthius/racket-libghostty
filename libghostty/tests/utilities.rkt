@@ -4,6 +4,11 @@
          racket/vector
          rackunit)
 
+(define (public-contract-error? error)
+  (and (exn:fail:contract? error)
+       (regexp-match? #rx"color-generate-palette: contract violation" (exn-message error))
+       (regexp-match? #rx"expected:.*color-palette" (exn-message error))))
+
 (test-case "color parsing, tables, palettes, and math"
   (check-equal? (color-parse "#abc") (color-rgb #xaa #xbb #xcc))
   (check-equal? (color-parse "  rgb:ff/00/80\t") (color-rgb 255 0 128))
@@ -27,9 +32,15 @@
                             #:base changed
                             #:preserve '(20)))
   (check-equal? (vector-ref generated 20) (color-rgb 1 2 3))
-  (check-exn exn:fail:contract?
+  (check-exn public-contract-error?
              (lambda ()
                (color-generate-palette (color-rgb 0 0 0) (color-rgb 255 255 255) #:base #())))
+  (define invalid-palette (make-vector 256 (color-rgb 0 0 0)))
+  (vector-set! invalid-palette 100 'not-a-color)
+  (check-exn
+   public-contract-error?
+   (lambda ()
+     (color-generate-palette (color-rgb 0 0 0) (color-rgb 255 255 255) #:base invalid-palette)))
   (check-equal? (color-luminance (color-rgb 0 0 0)) 0.0)
   (check-equal? (color-luminance (color-rgb 255 255 255)) 1.0)
   (check-= (color-contrast (color-rgb 0 0 0) (color-rgb 255 255 255)) 21.0 0.0001)
@@ -119,6 +130,74 @@
   (sgr-parser-close! parser)
   (check-true (sgr-parser-closed? parser))
   (check-exn exn:fail:ghostty:closed? (lambda () (sgr-parser-next! parser))))
+
+(define (check-concurrent-parser-close make-parser close! operate!)
+  (for ([_iteration (in-range 10)])
+    (define parser (make-parser))
+    (define started (make-semaphore 0))
+    (define result (make-channel))
+    (define collecting? (box #t))
+    (define collector
+      (thread (lambda ()
+                (let loop ()
+                  (when (unbox collecting?)
+                    (collect-garbage)
+                    (sleep 0)
+                    (loop))))))
+    (thread (lambda ()
+              (with-handlers ([exn:fail:ghostty:closed? (lambda (_error)
+                                                          (channel-put result 'closed))]
+                              [exn? (lambda (error) (channel-put result error))])
+                (semaphore-post started)
+                (operate! parser)
+                (channel-put result 'completed))))
+    (semaphore-wait started)
+    (close! parser)
+    (define outcome (sync/timeout 10 result))
+    (set-box! collecting? #f)
+    (thread-wait collector)
+    (unless outcome
+      (error 'parser-reachability-test "worker timed out"))
+    (when (exn? outcome)
+      (raise outcome))
+    (check-not-false (member outcome '(closed completed)))))
+
+(test-case "OSC parser stays reachable during concurrent GC and close"
+  (check-concurrent-parser-close make-osc-parser
+                                 osc-parser-close!
+                                 (lambda (parser) (osc-parser-feed! parser (make-bytes 16384 65)))))
+
+(test-case "SGR parser stays reachable during concurrent GC and close"
+  (check-concurrent-parser-close make-sgr-parser
+                                 sgr-parser-close!
+                                 (lambda (parser)
+                                   (sgr-parser-set-params! parser (make-vector 4096 1))
+                                   (let loop ()
+                                     (when (sgr-parser-next! parser)
+                                       (loop))))))
+
+(test-case "abandoned OSC and SGR parsers use finalizer fallbacks"
+  (for ([_iteration (in-range 100)])
+    (define osc (make-osc-parser))
+    (osc-parser-feed! osc #"0;abandoned")
+    (define sgr (make-sgr-parser))
+    (sgr-parser-set-params! sgr #(1 31)))
+  (collect-garbage)
+  (collect-garbage)
+  (define osc (make-osc-parser))
+  (define sgr (make-sgr-parser))
+  (osc-parser-close! osc)
+  (sgr-parser-close! sgr))
+
+(test-case "SGR ABI checks include unknown attribute storage"
+  (check-not-exn check-libghostty-abi!)
+  (define parser (make-sgr-parser))
+  (sgr-parser-set-params! parser #(999))
+  (define unknown (sgr-parser-next! parser))
+  (check-equal? (sgr-attribute-tag unknown) 'unknown)
+  (check-equal? (sgr-unknown-full (sgr-attribute-value unknown)) #(999))
+  (check-equal? (sgr-unknown-partial (sgr-attribute-value unknown)) #(999))
+  (sgr-parser-close! parser))
 
 (test-case "device values and native layouts are available"
   (define primary (primary-device-attributes 62 (vector->immutable-vector #(1 4 22))))

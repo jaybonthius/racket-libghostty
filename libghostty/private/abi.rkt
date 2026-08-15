@@ -2,6 +2,7 @@
 
 (require ffi/unsafe
          json
+         "ffi/abi-probe.rkt"
          "ffi/color.rkt"
          "ffi/common.rkt"
          "ffi/device.rkt"
@@ -125,7 +126,56 @@
                         (hash-ref offsets field-name)
                         (layout-ref native-field 'offset))))
 
-(define (check-sgr-storage-layout)
+(define (check-probed-sgr-layouts)
+  (check-equal-layout 'GhosttySgrUnknown
+                      'size
+                      (ctype-sizeof _GhosttySgrUnknown)
+                      (ghostty-racket-sgr-unknown-size))
+  (check-equal-layout 'GhosttySgrUnknown
+                      'alignment
+                      (ctype-alignof _GhosttySgrUnknown)
+                      (ghostty-racket-sgr-unknown-align))
+  (define unknown-offsets
+    (field-offsets (list (cons 'full-ptr _pointer)
+                         (cons 'full-len _size)
+                         (cons 'partial-ptr _pointer)
+                         (cons 'partial-len _size))))
+  (for ([field (in-list (list (cons 'full-ptr ghostty-racket-sgr-unknown-full-ptr-offset)
+                              (cons 'full-len ghostty-racket-sgr-unknown-full-len-offset)
+                              (cons 'partial-ptr ghostty-racket-sgr-unknown-partial-ptr-offset)
+                              (cons 'partial-len ghostty-racket-sgr-unknown-partial-len-offset)))])
+    (check-equal-layout 'GhosttySgrUnknown
+                        (format "field ~a offset" (car field))
+                        (hash-ref unknown-offsets (car field))
+                        ((cdr field))))
+  (check-equal-layout 'GhosttySgrAttributeValue
+                      'size
+                      (ctype-sizeof _GhosttySgrAttributeValue)
+                      (ghostty-racket-sgr-attribute-value-size))
+  (check-equal-layout 'GhosttySgrAttributeValue
+                      'alignment
+                      (ctype-alignof _GhosttySgrAttributeValue)
+                      (ghostty-racket-sgr-attribute-value-align))
+  (check-equal-layout 'GhosttySgrAttribute
+                      'size
+                      (ctype-sizeof _GhosttySgrAttributeStorage)
+                      (ghostty-racket-sgr-attribute-size))
+  (check-equal-layout 'GhosttySgrAttribute
+                      'alignment
+                      (ctype-alignof _GhosttySgrAttributeStorage)
+                      (ghostty-racket-sgr-attribute-align))
+  (define attribute-offsets
+    (field-offsets (list (cons 'tag _int) (cons 'value _GhosttySgrAttributeValue))))
+  (check-equal-layout 'GhosttySgrAttribute
+                      "field tag offset"
+                      (hash-ref attribute-offsets 'tag)
+                      (ghostty-racket-sgr-attribute-tag-offset))
+  (check-equal-layout 'GhosttySgrAttribute
+                      "field value offset"
+                      (hash-ref attribute-offsets 'value)
+                      (ghostty-racket-sgr-attribute-value-offset)))
+
+(define (check-sgr-runtime-layout)
   (define-values (result parser) (ghostty-sgr-new #f))
   (unless (= result 0)
     (error 'check-libghostty-abi! "could not create an SGR parser for its runtime layout check"))
@@ -133,19 +183,23 @@
    void
    (lambda ()
      (define parameter (malloc _uint16))
-     (ptr-set! parameter _uint16 1)
+     (ptr-set! parameter _uint16 999)
      (unless (= (ghostty-sgr-set-params parser parameter #f 1) 0)
        (error 'check-libghostty-abi! "could not initialize the SGR runtime layout check"))
-     (define storage (malloc 80 'atomic))
-     (for ([index (in-range 80)])
-       (ptr-set! storage _uint8 index #xa5))
-     (unless (ghostty-sgr-next parser storage)
+     (define attribute (make-ghostty-sgr-attribute))
+     (unless (ghostty-sgr-next parser attribute)
        (error 'check-libghostty-abi! "SGR runtime layout check returned no attribute"))
-     (unless (ptr-equal? (ghostty-sgr-attribute-value storage) (ptr-add storage 8))
+     (unless (= (ghostty-sgr-attribute-tag attribute) 1)
+       (error 'check-libghostty-abi! "GhosttySgrAttribute tag accessor mismatch"))
+     (define value (ghostty-sgr-attribute-value attribute))
+     (unless (ptr-equal? value (ptr-add attribute (ghostty-racket-sgr-attribute-value-offset)))
        (error 'check-libghostty-abi! "GhosttySgrAttribute value offset mismatch"))
-     (unless (for/and ([index (in-range 72 80)])
-               (= (ptr-ref storage _uint8 index) #xa5))
-       (error 'check-libghostty-abi! "GhosttySgrAttribute exceeds its declared 72-byte storage")))
+     (define-values (full-pointer full-length) (ghostty-sgr-unknown-full value))
+     (unless (and (= full-length 1) (= (ptr-ref full-pointer _uint16) 999))
+       (error 'check-libghostty-abi! "GhosttySgrUnknown full fields mismatch"))
+     (define-values (partial-pointer partial-length) (ghostty-sgr-unknown-partial value))
+     (unless (and (= partial-length 1) (= (ptr-ref partial-pointer _uint16) 999))
+       (error 'check-libghostty-abi! "GhosttySgrUnknown partial fields mismatch")))
    (lambda () (ghostty-sgr-free parser))))
 
 (define abi-checked? #f)
@@ -153,7 +207,8 @@
 (define (check-libghostty-abi!)
   (unless abi-checked?
     (for-each check-declaration declarations)
-    (check-sgr-storage-layout)
+    (check-probed-sgr-layouts)
+    (check-sgr-runtime-layout)
     (set! abi-checked? #t))
   (void))
 

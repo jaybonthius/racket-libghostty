@@ -10,6 +10,14 @@
          "private/terminal.rkt"
          "private/utilities.rkt")
 
+(define color-palette/c
+  (flat-named-contract 'color-palette
+                       (lambda (value)
+                         (and (vector? value)
+                              (= (vector-length value) 256)
+                              (for/and ([color (in-vector value)])
+                                (color-rgb? color))))))
+
 (provide (contract-out
           [exn:fail:ghostty? (-> any/c boolean?)]
           [exn:fail:ghostty-result (-> exn:fail:ghostty? symbol?)]
@@ -48,10 +56,11 @@
           [color-parse-palette-entry (-> string? (values (integer-in 0 255) color-rgb?))]
           [color-default-palette (-> (and/c vector? immutable?))]
           [color-generate-palette
-           (->*
-            [color-rgb? color-rgb?]
-            [#:base (or/c #f vector?) #:preserve (listof (integer-in 0 255)) #:harmonious? boolean?]
-            (and/c vector? immutable?))]
+           (->* [color-rgb? color-rgb?]
+                [#:base (or/c #f color-palette/c)
+                 #:preserve (listof (integer-in 0 255))
+                 #:harmonious? boolean?]
+                (and/c vector? immutable?))]
           [color-luminance (-> color-rgb? (real-in 0.0 1.0))]
           [color-perceived-luminance (-> color-rgb? (real-in 0.0 1.0))]
           [color-contrast (-> color-rgb? color-rgb? (real-in 1.0 21.0))]

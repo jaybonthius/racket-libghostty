@@ -34,11 +34,11 @@ Describes the loaded libghostty-vt build.
 }
 
 @defproc[(libghostty-type-layouts) hash?]{
-Returns the immutable JSON-derived description produced by @tt{ghostty_type_json}. It contains the native size, alignment, and field offsets for every public C struct.
+Returns the immutable JSON-derived description produced by @tt{ghostty_type_json}. It contains the native size, alignment, and field offsets emitted by the loaded library. SGR layouts omitted by that metadata remain private and are checked against a packaged companion probe built from the pinned headers.
 }
 
 @defproc[(check-libghostty-abi!) void?]{
-Checks every C struct represented by this release against the metadata from the loaded library. A mismatch raises @racket[exn:fail?]. The same check runs when the public module loads.
+Checks every C struct and union represented by this release against either metadata from the loaded library or the packaged pinned-header ABI probe. A mismatch raises @racket[exn:fail?]. The same check runs when the public module loads.
 }
 
 @section{Terminals}
@@ -100,7 +100,7 @@ The operation creates a native formatter that borrows @racket[terminal], copies 
 
 @defproc[(color-default-palette) vector?]{Returns an immutable 256-element vector containing Ghostty's built-in palette.}
 
-@defproc[(color-generate-palette [background color-rgb?] [foreground color-rgb?] [#:base base (or/c #f vector?) #f] [#:preserve preserve (listof (integer-in 0 255)) null] [#:harmonious? harmonious? boolean? #f]) vector?]{Generates an immutable 256-color palette. @racket[#f] selects the native default base, and indices in @racket[preserve] retain their base values. The optional base must contain 256 @racket[color-rgb?] values.}
+@defproc[(color-generate-palette [background color-rgb?] [foreground color-rgb?] [#:base base (or/c #f (vectorof color-rgb?)) #f] [#:preserve preserve (listof (integer-in 0 255)) null] [#:harmonious? harmonious? boolean? #f]) vector?]{Generates an immutable 256-color palette. @racket[#f] selects the native default base, and indices in @racket[preserve] retain their base values. The public contract requires the optional base to contain exactly 256 @racket[color-rgb?] values.}
 
 @defproc[(color-luminance [color color-rgb?]) (real-in 0.0 1.0)]{Returns WCAG relative luminance.}
 
@@ -202,5 +202,5 @@ Returns the native result code, or @racket[#f] for a wrapper lifecycle failure.
 }
 
 @defproc[(exn:fail:ghostty:closed? [value any/c]) boolean?]{
-Reports use of a terminal after its explicit or fallback close.
+Reports use of an owned handle after its explicit or fallback close.
 }

@@ -2,9 +2,14 @@
 #|review: ignore|#
 
 (require ffi/unsafe
+         "abi-probe.rkt"
+         "color.rkt"
          "loader.rkt")
 
 (provide _GhosttySgrParser
+         _GhosttySgrUnknown
+         _GhosttySgrAttributeValue
+         _GhosttySgrAttributeStorage
          make-ghostty-sgr-attribute
          ghostty-sgr-new
          ghostty-sgr-free
@@ -12,12 +17,19 @@
          ghostty-sgr-set-params
          ghostty-sgr-next
          ghostty-sgr-attribute-tag
-         ghostty-sgr-attribute-value)
+         ghostty-sgr-attribute-value
+         ghostty-sgr-unknown-full
+         ghostty-sgr-unknown-partial)
 
 (define-cpointer-type _GhosttySgrParser)
+(define-cstruct _GhosttySgrUnknown
+                ([full-ptr _pointer] [full-len _size] [partial-ptr _pointer] [partial-len _size]))
+(define _GhosttySgrAttributeValue
+  (_union _GhosttySgrUnknown _int _GhosttyColorRgb _uint8 (_array _uint64 8)))
+(define _GhosttySgrAttributeStorage (make-cstruct-type (list _int _GhosttySgrAttributeValue)))
 
 (define (make-ghostty-sgr-attribute)
-  (malloc 72 'atomic))
+  (malloc _GhosttySgrAttributeStorage 'atomic))
 
 (define-ghostty ghostty-sgr-new/raw (_fun _pointer _pointer -> _int) #:c-id ghostty_sgr_new)
 (define (ghostty-sgr-new allocator)
@@ -37,7 +49,14 @@
                 (_fun _GhosttySgrParser _pointer -> _stdbool)
                 #:c-id ghostty_sgr_next)
 
-(define (ghostty-sgr-attribute-tag attribute)
-  (ptr-ref attribute _int))
-(define (ghostty-sgr-attribute-value attribute)
-  (ptr-add attribute 8))
+(define ghostty-sgr-attribute-tag ghostty-racket-sgr-attribute-tag)
+(define-ghostty ghostty-sgr-attribute-value
+                (_fun _pointer -> _pointer)
+                #:c-id ghostty_sgr_attribute_value)
+
+(define (ghostty-sgr-unknown-full value)
+  (values (ghostty-racket-sgr-unknown-full-ptr value) (ghostty-racket-sgr-unknown-full-len value)))
+
+(define (ghostty-sgr-unknown-partial value)
+  (values (ghostty-racket-sgr-unknown-partial-ptr value)
+          (ghostty-racket-sgr-unknown-partial-len value)))

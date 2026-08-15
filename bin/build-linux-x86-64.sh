@@ -46,7 +46,11 @@ if [[ ! -f "$library" || ! -f "$header" ]]; then
 fi
 
 cp -L "$library" "$PACKAGE/libghostty-vt.so"
-strip "$PACKAGE/libghostty-vt.so"
+zig cc -std=c11 -O2 -fPIC -shared \
+  -I"$PREFIX/include" \
+  "$ROOT/native/ghostty-vt-abi.c" \
+  -o "$PACKAGE/libghostty-vt-abi.so"
+strip "$PACKAGE/libghostty-vt.so" "$PACKAGE/libghostty-vt-abi.so"
 printf '%s\n' "$GHOSTTY_COMMIT" > "$PREFIX/GHOSTTY_COMMIT"
-printf 'built %s from Ghostty %s with Zig %s\n' \
+printf 'built %s and ABI probe from Ghostty %s headers with Zig %s\n' \
   "$PACKAGE/libghostty-vt.so" "$GHOSTTY_COMMIT" "$(zig version)"

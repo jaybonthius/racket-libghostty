@@ -224,10 +224,8 @@
                               (ptr-ref pointer _uint16 index))))
 
 (define (copy-unknown value)
-  (define full-pointer (ptr-ref value _pointer 0))
-  (define full-length (ptr-ref value _size 1))
-  (define partial-pointer (ptr-ref value _pointer 2))
-  (define partial-length (ptr-ref value _size 3))
+  (define-values (full-pointer full-length) (ghostty-sgr-unknown-full value))
+  (define-values (partial-pointer partial-length) (ghostty-sgr-unknown-partial value))
   (sgr-unknown (copy-uint16-vector full-pointer full-length)
                (copy-uint16-vector partial-pointer partial-length)))
 
