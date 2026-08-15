@@ -4,6 +4,8 @@
          (only-in libghostty/private/selection-test-support
                   terminal-raw-selection-endpoints-screen-convertible?
                   terminal-test-hold-lock!)
+         racket/port
+         racket/runtime-path
          rackunit)
 
 (define (call-with-terminal columns rows procedure)
@@ -35,29 +37,29 @@
 (define (closed-or-completed? value)
   (or (eq? value 'completed) (exn:fail:ghostty:closed? value)))
 
-(define (break-during-operation operation [cleanup void])
-  (define result (make-channel))
-  (define ready (make-semaphore 0))
-  (define worker
-    (thread (lambda ()
-              (parameterize-break #f
-                                  (with-handlers ([exn:break? (lambda (error)
-                                                                (channel-put result error))]
-                                                  [exn? (lambda (error) (channel-put result error))])
-                                    (semaphore-post ready)
-                                    (let loop ()
-                                      (define value (parameterize-break #t (operation)))
-                                      (cleanup value)
-                                      (loop)))))))
-  (sync/checked 10 ready)
-  (break-thread worker)
-  (define outcome (sync/checked 10 result))
-  (sync/checked 10 (thread-dead-evt worker))
-  (unless (exn:break? outcome)
-    (if (exn? outcome)
-        (raise outcome)
-        (error 'break-during-operation "target operation was not interrupted")))
-  outcome)
+(define-runtime-path selection-test-path "selection.rkt")
+
+(define (run-break-probe)
+  (define racket-executable (find-executable-path "racket"))
+  (unless racket-executable
+    (error 'run-break-probe "could not find the Racket executable"))
+  (define expression
+    (format "(dynamic-require '(submod (file ~s) break-probe) #f)"
+            (path->string selection-test-path)))
+  (define-values (process stdout stdin stderr)
+    (subprocess #f #f #f racket-executable "-e" expression))
+  (close-output-port stdin)
+  (define waiter (thread (lambda () (subprocess-wait process))))
+  (unless (sync/timeout 45 waiter)
+    (subprocess-kill process #t)
+    (subprocess-wait process)
+    (error 'run-break-probe "break probe exceeded its wall-clock limit\n~a" (port->string stderr)))
+  (define output (port->string stdout))
+  (define errors (port->string stderr))
+  (close-input-port stdout)
+  (close-input-port stderr)
+  (unless (zero? (subprocess-status process))
+    (error 'run-break-probe "break probe failed\n~a~a" output errors)))
 
 (test-case "tracked references copy complete cell and row values"
   (call-with-terminal
@@ -499,31 +501,8 @@
      (tracked-grid-reference-close! reference)
      (check-true (tracked-grid-reference-closed? reference)))))
 
-(test-case "breaks interrupt only target operations and leave the terminal reusable"
-  (call-with-terminal
-   80
-   24
-   (lambda (terminal)
-     (check-true (exn:break? (break-during-operation
-                              (lambda () (terminal-track-grid-reference terminal (active 0 0)))
-                              tracked-grid-reference-close!)))
-     (collect-garbage)
-     (define first-reference (terminal-track-grid-reference terminal (active 0 0)))
-     (tracked-grid-reference-close! first-reference)
-     (terminal-write! terminal (make-bytes 100000 (char->integer #\x)))
-     (check-true (exn:break? (break-during-operation
-                              (lambda ()
-                                (terminal-set-selection! terminal (active 0 0) (active 79 23))))))
-     (terminal-set-selection! terminal (active 0 0) (active 79 23))
-     (check-true (terminal-selection-state? (terminal-selection terminal)))
-     (check-true (exn:break? (break-during-operation (lambda () (terminal-select-all! terminal)))))
-     (check-true (terminal-select-all! terminal))
-     (check-true (terminal-selection-state? (terminal-selection terminal)))
-     (check-true (exn:break? (break-during-operation (lambda ()
-                                                       (terminal-selection->plain-text terminal)))))
-     (check-true (string? (terminal-selection->plain-text terminal)))
-     (define final-reference (terminal-track-grid-reference terminal (active 0 0)))
-     (tracked-grid-reference-close! final-reference))))
+(test-case "breaks at owned native state leave the terminal reusable"
+  (run-break-probe))
 
 (test-case "tracked calls retain terminal callback rejection and close-race safety"
   (define terminal (make-terminal 8 2))
@@ -620,3 +599,93 @@
   (tracked-grid-reference-close! reference)
   (terminal-close! first)
   (terminal-close! second))
+
+(module break-probe racket/base
+  (require libghostty
+           (only-in libghostty/private/selection-test-support call-with-selection-test-hook))
+
+  (define (active x y)
+    (terminal-grid-point 'active x y))
+
+  (define (terminate-worker! worker release)
+    (semaphore-post release)
+    (unless (thread-dead? worker)
+      (break-thread worker)
+      (unless (sync/timeout 1 (thread-dead-evt worker))
+        (kill-thread worker)
+        (unless (sync/timeout 1 (thread-dead-evt worker))
+          (error 'break-probe "could not terminate an interrupted worker")))))
+
+  (define (interrupt-at phase operation)
+    (define entered (make-channel))
+    (define release (make-semaphore 0))
+    (define result (make-channel))
+    (define worker
+      (thread (lambda ()
+                (parameterize-break
+                 #f
+                 (with-handlers ([exn? (lambda (error) (channel-put result error))])
+                   (call-with-selection-test-hook
+                    (lambda (actual-phase)
+                      (when (eq? actual-phase phase)
+                        (channel-put entered actual-phase)
+                        (unless (sync/timeout 10 release)
+                          (error 'break-probe "timed out inside test hook ~a" phase))))
+                    (lambda ()
+                      (parameterize-break #t (operation))
+                      (channel-put result 'completed))))))))
+    (define first
+      (sync/timeout 10
+                    (handle-evt entered (lambda (actual-phase) (cons 'entered actual-phase)))
+                    (handle-evt result (lambda (outcome) (cons 'result outcome)))))
+    (unless first
+      (terminate-worker! worker release)
+      (error 'break-probe "operation did not reach test hook ~a" phase))
+    (when (eq? (car first) 'result)
+      (terminate-worker! worker release)
+      (define outcome (cdr first))
+      (if (exn? outcome)
+          (raise outcome)
+          (error 'break-probe "operation completed before test hook ~a" phase)))
+    (unless (eq? (cdr first) phase)
+      (terminate-worker! worker release)
+      (error 'break-probe "expected hook ~a, received ~a" phase (cdr first)))
+    (break-thread worker)
+    (semaphore-post release)
+    (define outcome (sync/timeout 10 result))
+    (unless outcome
+      (terminate-worker! worker release)
+      (error 'break-probe "interrupted operation did not unwind at hook ~a" phase))
+    (unless (exn:break? outcome)
+      (terminate-worker! worker release)
+      (if (exn? outcome)
+          (raise outcome)
+          (error 'break-probe "operation at hook ~a was not interrupted" phase)))
+    (unless (sync/timeout 10 (thread-dead-evt worker))
+      (terminate-worker! worker release)
+      (error 'break-probe "interrupted worker remained alive at hook ~a" phase)))
+
+  (define terminal (make-terminal 80 24))
+  (dynamic-wind
+   void
+   (lambda ()
+     (interrupt-at 'tracked-reference-owned
+                   (lambda () (terminal-track-grid-reference terminal (active 0 0))))
+     (collect-garbage)
+     (define first-reference (terminal-track-grid-reference terminal (active 0 0)))
+     (tracked-grid-reference-close! first-reference)
+     (terminal-write! terminal (make-bytes 100000 (char->integer #\x)))
+     (interrupt-at 'selection-install-prepared
+                   (lambda () (terminal-set-selection! terminal (active 0 0) (active 79 23))))
+     (unless (terminal-selection-state? (terminal-selection terminal))
+       (error 'break-probe "direct selection installation left no reusable selection"))
+     (interrupt-at 'selection-install-prepared (lambda () (terminal-select-all! terminal)))
+     (unless (terminal-selection-state? (terminal-selection terminal))
+       (error 'break-probe "derived selection installation left no reusable selection"))
+     (interrupt-at 'selection-format-allocated (lambda () (terminal-selection->plain-text terminal)))
+     (unless (string? (terminal-selection->plain-text terminal))
+       (error 'break-probe "selection formatting left no reusable selection"))
+     (terminal-clear-selection! terminal)
+     (define final-reference (terminal-track-grid-reference terminal (active 0 0)))
+     (tracked-grid-reference-close! final-reference))
+   (lambda () (terminal-close! terminal))))

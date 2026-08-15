@@ -129,6 +129,16 @@
 (define current-callback-terminal (make-parameter #f))
 (define current-callback-snapshot-decoder (make-parameter #f))
 (define current-terminal-operation (make-parameter #f))
+(define current-selection-test-hook (make-parameter #f))
+
+(define (call-with-selection-test-hook hook procedure)
+  (parameterize ([current-selection-test-hook hook])
+    (procedure)))
+
+(define (run-selection-test-hook phase)
+  (define hook (current-selection-test-hook))
+  (when hook
+    (hook phase)))
 
 (define continuation-max-bytes-option 31)
 (define continuation-max-bytes-data 36)
@@ -1473,6 +1483,7 @@
        (lambda ()
          (set! tracked
                (create-tracked-grid-reference-pointer 'terminal-track-grid-reference pointer point))
+         (run-selection-test-hook 'tracked-reference-owned)
          (define result
            (tracked-grid-reference (box tracked)
                                    value
@@ -1640,6 +1651,7 @@
       (define fresh-selection
         (make-GhosttySelection (ctype-sizeof _GhosttySelection) fresh-start fresh-end rectangle?))
       (set! new-owner (active-selection-owner screen start-tracked end-tracked rectangle?))
+      (run-selection-test-hook 'selection-install-prepared)
       (check-ghostty-result who (ghostty-terminal-set pointer selection-option fresh-selection))
       (release-selection-owner! value)
       (set-terminal-selection-owner! value new-owner)
@@ -1883,6 +1895,7 @@
            (check-ghostty-result
             'terminal-selection->plain-text
             (ghostty-terminal-selection-format-alloc/into pointer #f options output-cell length-cell))
+           (run-selection-test-hook 'selection-format-allocated)
            (define output (ptr-ref output-cell _pointer))
            (define length (ptr-ref length-cell _size))
            (when (and (positive? length) (not output))
@@ -1958,3 +1971,6 @@
                                                                (terminal-render-state value)
                                                                (terminal-row-iterator value)
                                                                (terminal-row-cells value)))))
+
+(module+ test-support
+  (provide call-with-selection-test-hook))

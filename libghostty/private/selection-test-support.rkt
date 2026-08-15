@@ -6,9 +6,11 @@
          "ffi/point.rkt"
          "ffi/selection.rkt"
          "ffi/terminal.rkt"
-         "terminal.rkt")
+         "terminal.rkt"
+         (only-in (submod "terminal.rkt" test-support) call-with-selection-test-hook))
 
-(provide terminal-raw-selection-endpoints-screen-convertible?
+(provide call-with-selection-test-hook
+         terminal-raw-selection-endpoints-screen-convertible?
          terminal-test-hold-lock!)
 
 (define (terminal-test-hold-lock! terminal entered release)
