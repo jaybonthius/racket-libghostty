@@ -6,6 +6,7 @@
          "private/build-info.rkt"
          "private/color.rkt"
          "private/error.rkt"
+         "private/grid-reference.rkt"
          "private/input.rkt"
          "private/parsers.rkt"
          "private/render.rkt"
@@ -59,6 +60,87 @@
            (-> terminal? (integer-in 0 18446744073709551615) void?)]
           [terminal-continuation-bytes (-> terminal? (and/c bytes? immutable?))]
           [terminal-vt-ground? (-> terminal? boolean?)]
+          (struct terminal-grid-point
+                  ([space (or/c 'active 'viewport 'screen 'history)] [x (integer-in 0 65535)]
+                                                                     [y (integer-in 0 4294967295)]))
+          (struct terminal-grid-cell
+                  ([codepoint (integer-in 0 4294967295)]
+                   [grapheme (and/c string? immutable?)]
+                   [width (integer-in 0 2)]
+                   [wide (or/c 'narrow 'wide 'spacer-tail 'spacer-head)]
+                   [content (or/c 'codepoint 'grapheme 'background-palette 'background-rgb)]
+                   [has-text? boolean?]
+                   [has-styling? boolean?]
+                   [style-id (integer-in 0 65535)]
+                   [hyperlink-uri (or/c #f (and/c bytes? immutable?))]
+                   [protected? boolean?]
+                   [semantic-content (or/c 'output 'input 'prompt)]
+                   [content-color (or/c #f render-style-color?)]
+                   [style render-style?]))
+          (struct terminal-grid-row
+                  ([wrap? boolean?] [wrap-continuation? boolean?]
+                                    [grapheme? boolean?]
+                                    [styled? boolean?]
+                                    [hyperlink? boolean?]
+                                    [semantic-prompt (or/c 'none 'prompt 'prompt-continuation)]
+                                    [kitty-virtual-placeholder? boolean?]
+                                    [dirty? boolean?]))
+          (struct grid-reference-snapshot
+                  ([screen (or/c 'primary 'alternate)] [point terminal-grid-point?]
+                                                       [cell terminal-grid-cell?]
+                                                       [row terminal-grid-row?]))
+          [tracked-grid-reference? (-> any/c boolean?)]
+          [terminal-track-grid-reference (-> terminal? terminal-grid-point? tracked-grid-reference?)]
+          [tracked-grid-reference-closed? (-> tracked-grid-reference? boolean?)]
+          [tracked-grid-reference-close! (-> tracked-grid-reference? void?)]
+          [tracked-grid-reference-has-value? (-> tracked-grid-reference? boolean?)]
+          [tracked-grid-reference-point
+           (-> tracked-grid-reference?
+               (or/c 'active 'viewport 'screen 'history)
+               (or/c #f terminal-grid-point?))]
+          [tracked-grid-reference-set! (-> tracked-grid-reference? terminal-grid-point? void?)]
+          [tracked-grid-reference->snapshot
+           (-> tracked-grid-reference? (or/c #f grid-reference-snapshot?))]
+          (struct terminal-selection-state
+                  ([screen (or/c 'primary 'alternate)] [start terminal-grid-point?]
+                                                       [end terminal-grid-point?]
+                                                       [rectangle? boolean?]))
+          [terminal-selection (-> terminal? (or/c #f terminal-selection-state?))]
+          [terminal-set-selection!
+           (->* [terminal? terminal-grid-point? terminal-grid-point?] [#:rectangle? boolean?] void?)]
+          [terminal-clear-selection! (-> terminal? void?)]
+          [terminal-select-all! (-> terminal? boolean?)]
+          [terminal-select-word!
+           (->* [terminal? terminal-grid-point?] [#:boundary-characters (or/c #f string?)] boolean?)]
+          [terminal-select-word-between!
+           (->* [terminal? terminal-grid-point? terminal-grid-point?]
+                [#:boundary-characters (or/c #f string?)]
+                boolean?)]
+          [terminal-select-line!
+           (->* [terminal? terminal-grid-point?]
+                [#:whitespace-characters (or/c #f string?) #:semantic-prompt-boundary? boolean?]
+                boolean?)]
+          [terminal-select-output! (-> terminal? terminal-grid-point? boolean?)]
+          [terminal-selection-adjust!
+           (-> terminal?
+               (or/c 'left
+                     'right
+                     'up
+                     'down
+                     'home
+                     'end
+                     'page-up
+                     'page-down
+                     'beginning-of-line
+                     'end-of-line)
+               boolean?)]
+          [terminal-selection-order
+           (-> terminal? (or/c #f 'forward 'reverse 'mirrored-forward 'mirrored-reverse))]
+          [terminal-selection-contains? (-> terminal? terminal-grid-point? boolean?)]
+          [terminal-selection->plain-text
+           (->* [terminal?]
+                [#:unwrap? boolean? #:trim? boolean?]
+                (or/c #f (and/c string? immutable?)))]
           [terminal->snapshot-bytes (-> terminal? (and/c bytes? immutable?))]
           [snapshot-bytes->terminal
            (->* [bytes?]

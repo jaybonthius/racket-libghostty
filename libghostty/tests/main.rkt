@@ -1,8 +1,7 @@
 #lang racket/base
 
 (require libghostty
-         rackunit
-         (prefix-in test: (submod "../private/terminal.rkt" test-support)))
+         rackunit)
 
 (define (call-with-terminal columns rows procedure)
   (define terminal (make-terminal columns rows))
@@ -287,7 +286,7 @@
      (check-false (render-row-selection (vector-ref (render-snapshot-row-data absent) 0)))
      (for ([cell (in-vector (render-row-cells (vector-ref (render-snapshot-row-data absent) 0)))])
        (check-false (render-cell-selected? cell)))
-     (test:terminal-test-select-all! terminal)
+     (check-true (terminal-select-all! terminal))
      (define selected (terminal-render-snapshot terminal))
      (define row (vector-ref (render-snapshot-row-data selected) 0))
      (define selection (render-row-selection row))
@@ -338,11 +337,6 @@
                     (render-cell-selected? cell)))
      (check-exn exn:fail:contract? (lambda () (rebuild-cell (string-copy "mutable"))))
      (check-not-exn (lambda () (rebuild-cell "immutable"))))))
-
-(test-case "selection mutation helper is available only from test support"
-  (check-exn exn:fail?
-             (lambda () (dynamic-require 'libghostty/private/terminal 'terminal-test-select-all!)))
-  (check-true (procedure? test:terminal-test-select-all!)))
 
 (test-case "render snapshots are immutable copies that survive mutation and close"
   (define terminal (make-terminal 8 2))

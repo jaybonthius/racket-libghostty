@@ -18,6 +18,8 @@
          (struct-out render-cell)
          (struct-out render-style)
          (struct-out render-style-color)
+         copy-native-rgb
+         copy-native-style
          copy-terminal-render-snapshot)
 
 (struct render-snapshot (columns rows dirty colors cursor row-data) #:transparent)
@@ -72,7 +74,7 @@
   #:transparent)
 (struct render-style-color (source value) #:transparent)
 
-(define (native->rgb value)
+(define (copy-native-rgb value)
   (color-rgb (GhosttyColorRgb-r value) (GhosttyColorRgb-g value) (GhosttyColorRgb-b value)))
 
 (define (query who getter handle key type)
@@ -112,13 +114,13 @@
   (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-colors-get state output))
   (define value (ptr-ref output _GhosttyRenderStateColors))
   (define palette (GhosttyRenderStateColors-palette value))
-  (render-colors (native->rgb (GhosttyRenderStateColors-background value))
-                 (native->rgb (GhosttyRenderStateColors-foreground value))
+  (render-colors (copy-native-rgb (GhosttyRenderStateColors-background value))
+                 (copy-native-rgb (GhosttyRenderStateColors-foreground value))
                  (and (GhosttyRenderStateColors-cursor-has-value value)
-                      (native->rgb (GhosttyRenderStateColors-cursor value)))
+                      (copy-native-rgb (GhosttyRenderStateColors-cursor value)))
                  (vector->immutable-vector (for/vector #:length 256
                                                        ([index (in-range 256)])
-                                             (native->rgb (array-ref palette index))))))
+                                             (copy-native-rgb (array-ref palette index))))))
 
 (define (copy-cursor state)
   (define viewport? (render-state-query 'terminal-render-snapshot state 14 _stdbool))
@@ -161,14 +163,10 @@
   (case tag
     [(0) (render-style-color 'none #f)]
     [(1) (render-style-color 'palette (union-ref (GhosttyStyleColor-value value) 0))]
-    [(2) (render-style-color 'rgb (native->rgb (union-ref (GhosttyStyleColor-value value) 1)))]
+    [(2) (render-style-color 'rgb (copy-native-rgb (union-ref (GhosttyStyleColor-value value) 1)))]
     [else (error 'terminal-render-snapshot "unknown style color tag ~a" tag)]))
 
-(define (copy-style cells)
-  (define output (malloc _GhosttyStyle 'atomic))
-  (ptr-set! output _size 0 (ctype-sizeof _GhosttyStyle))
-  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-row-cells-get cells 2 output))
-  (define value (ptr-ref output _GhosttyStyle))
+(define (copy-native-style value)
   (render-style (copy-style-color (GhosttyStyle-fg-color value))
                 (copy-style-color (GhosttyStyle-bg-color value))
                 (copy-style-color (GhosttyStyle-underline-color value))
@@ -182,6 +180,12 @@
                 (GhosttyStyle-overline value)
                 (enum-ref 'terminal-render-snapshot underline-values (GhosttyStyle-underline value))))
 
+(define (copy-style cells)
+  (define output (malloc _GhosttyStyle 'atomic))
+  (ptr-set! output _size 0 (ctype-sizeof _GhosttyStyle))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-row-cells-get cells 2 output))
+  (copy-native-style (ptr-ref output _GhosttyStyle)))
+
 (define (copy-optional-resolved-color cells key)
   (define output (malloc _GhosttyColorRgb 'atomic))
   (define result (ghostty-render-state-row-cells-get cells key output))
@@ -189,7 +193,7 @@
     [(= result GHOSTTY-INVALID-VALUE) #f]
     [else
      (check-ghostty-result 'terminal-render-snapshot result)
-     (native->rgb (ptr-ref output _GhosttyColorRgb))]))
+     (copy-native-rgb (ptr-ref output _GhosttyColorRgb))]))
 
 (define (copy-grapheme cells)
   (define initial (make-GhosttyBuffer #f 0 0))
@@ -225,7 +229,7 @@
     [(background-rgb)
      (render-style-color
       'rgb
-      (native->rgb (raw-cell-query 'terminal-render-snapshot cell 11 _GhosttyColorRgb)))]
+      (copy-native-rgb (raw-cell-query 'terminal-render-snapshot cell 11 _GhosttyColorRgb)))]
     [else #f]))
 
 (define (copy-cell cells x y)

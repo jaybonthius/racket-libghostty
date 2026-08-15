@@ -10,6 +10,7 @@
          _GhosttyStyleColorValue
          _GhosttyStyleColor
          _GhosttyStyle
+         _GhosttyStyle-pointer
          ghostty-style-default
          ghostty-style-is-default)
 

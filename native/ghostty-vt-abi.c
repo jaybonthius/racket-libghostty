@@ -1,3 +1,4 @@
+#include <ghostty/vt/grid_ref_tracked.h>
 #include <ghostty/vt/io.h>
 #include <ghostty/vt/key.h>
 #include <ghostty/vt/mouse.h>
@@ -38,6 +39,142 @@ bool ghostty_racket_terminal_continuation_abi_check(void) {
       GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES == 36 &&
       GHOSTTY_TERMINAL_DATA_VT_GROUND == 38 &&
       write_until_ground != NULL && continuation_alloc != NULL;
+}
+
+size_t ghostty_racket_point_value_size(void) {
+  return sizeof(GhosttyPointValue);
+}
+
+size_t ghostty_racket_point_value_align(void) {
+  return _Alignof(GhosttyPointValue);
+}
+
+size_t ghostty_racket_selection_format_options_size(void) {
+  return sizeof(GhosttyTerminalSelectionFormatOptions);
+}
+
+size_t ghostty_racket_selection_format_options_align(void) {
+  return _Alignof(GhosttyTerminalSelectionFormatOptions);
+}
+
+size_t ghostty_racket_selection_format_options_emit_offset(void) {
+  return offsetof(GhosttyTerminalSelectionFormatOptions, emit);
+}
+
+size_t ghostty_racket_selection_format_options_unwrap_offset(void) {
+  return offsetof(GhosttyTerminalSelectionFormatOptions, unwrap);
+}
+
+size_t ghostty_racket_selection_format_options_trim_offset(void) {
+  return offsetof(GhosttyTerminalSelectionFormatOptions, trim);
+}
+
+size_t ghostty_racket_selection_format_options_selection_offset(void) {
+  return offsetof(GhosttyTerminalSelectionFormatOptions, selection);
+}
+
+bool ghostty_racket_selection_abi_check(void) {
+  GhosttyResult (*terminal_get)(GhosttyTerminal, GhosttyTerminalData, void *) =
+      ghostty_terminal_get;
+  GhosttyResult (*terminal_set)(GhosttyTerminal, GhosttyTerminalOption,
+                                const void *) = ghostty_terminal_set;
+  GhosttyResult (*terminal_grid_ref)(GhosttyTerminal, GhosttyPoint,
+                                     GhosttyGridRef *) = ghostty_terminal_grid_ref;
+  GhosttyResult (*terminal_grid_ref_track)(GhosttyTerminal, GhosttyPoint,
+                                           GhosttyTrackedGridRef *) =
+      ghostty_terminal_grid_ref_track;
+  GhosttyResult (*terminal_point_from_grid_ref)(GhosttyTerminal,
+                                                const GhosttyGridRef *,
+                                                GhosttyPointTag,
+                                                GhosttyPointCoordinate *) =
+      ghostty_terminal_point_from_grid_ref;
+  void (*tracked_free)(GhosttyTrackedGridRef) = ghostty_tracked_grid_ref_free;
+  bool (*tracked_has_value)(GhosttyTrackedGridRef) =
+      ghostty_tracked_grid_ref_has_value;
+  GhosttyResult (*tracked_point)(GhosttyTrackedGridRef, GhosttyPointTag,
+                                 GhosttyPointCoordinate *) =
+      ghostty_tracked_grid_ref_point;
+  GhosttyResult (*tracked_set)(GhosttyTrackedGridRef, GhosttyTerminal,
+                               GhosttyPoint) = ghostty_tracked_grid_ref_set;
+  GhosttyResult (*tracked_snapshot)(GhosttyTrackedGridRef, GhosttyGridRef *) =
+      ghostty_tracked_grid_ref_snapshot;
+  GhosttyResult (*grid_cell)(const GhosttyGridRef *, GhosttyCell *) =
+      ghostty_grid_ref_cell;
+  GhosttyResult (*grid_row)(const GhosttyGridRef *, GhosttyRow *) =
+      ghostty_grid_ref_row;
+  GhosttyResult (*grid_graphemes)(const GhosttyGridRef *, uint32_t *, size_t,
+                                  size_t *) = ghostty_grid_ref_graphemes;
+  GhosttyResult (*grid_hyperlink)(const GhosttyGridRef *, uint8_t *, size_t,
+                                  size_t *) = ghostty_grid_ref_hyperlink_uri;
+  GhosttyResult (*grid_style)(const GhosttyGridRef *, GhosttyStyle *) =
+      ghostty_grid_ref_style;
+  GhosttyResult (*select_word)(GhosttyTerminal,
+                               const GhosttyTerminalSelectWordOptions *,
+                               GhosttySelection *) = ghostty_terminal_select_word;
+  GhosttyResult (*select_word_between)(
+      GhosttyTerminal, const GhosttyTerminalSelectWordBetweenOptions *,
+      GhosttySelection *) = ghostty_terminal_select_word_between;
+  GhosttyResult (*select_line)(GhosttyTerminal,
+                               const GhosttyTerminalSelectLineOptions *,
+                               GhosttySelection *) = ghostty_terminal_select_line;
+  GhosttyResult (*select_all)(GhosttyTerminal, GhosttySelection *) =
+      ghostty_terminal_select_all;
+  GhosttyResult (*select_output)(GhosttyTerminal, GhosttyGridRef,
+                                 GhosttySelection *) =
+      ghostty_terminal_select_output;
+  GhosttyResult (*format_alloc)(GhosttyTerminal, const GhosttyAllocator *,
+                                GhosttyTerminalSelectionFormatOptions,
+                                uint8_t **, size_t *) =
+      ghostty_terminal_selection_format_alloc;
+  GhosttyResult (*selection_adjust)(GhosttyTerminal, GhosttySelection *,
+                                    GhosttySelectionAdjust) =
+      ghostty_terminal_selection_adjust;
+  GhosttyResult (*selection_order)(GhosttyTerminal, const GhosttySelection *,
+                                   GhosttySelectionOrder *) =
+      ghostty_terminal_selection_order;
+  GhosttyResult (*selection_contains)(GhosttyTerminal,
+                                      const GhosttySelection *, GhosttyPoint,
+                                      bool *) =
+      ghostty_terminal_selection_contains;
+  return sizeof(GhosttyTrackedGridRef) == sizeof(void *) &&
+      offsetof(GhosttyTerminalSelectionFormatOptions, size) == 0 &&
+      sizeof(GhosttyPointTag) == 4 &&
+      GHOSTTY_POINT_TAG_ACTIVE == 0 && GHOSTTY_POINT_TAG_VIEWPORT == 1 &&
+      GHOSTTY_POINT_TAG_SCREEN == 2 && GHOSTTY_POINT_TAG_HISTORY == 3 &&
+      sizeof(GhosttyTerminalScreen) == 4 &&
+      GHOSTTY_TERMINAL_SCREEN_PRIMARY == 0 &&
+      GHOSTTY_TERMINAL_SCREEN_ALTERNATE == 1 &&
+      sizeof(GhosttySelectionOrder) == 4 &&
+      GHOSTTY_SELECTION_ORDER_FORWARD == 0 &&
+      GHOSTTY_SELECTION_ORDER_REVERSE == 1 &&
+      GHOSTTY_SELECTION_ORDER_MIRRORED_FORWARD == 2 &&
+      GHOSTTY_SELECTION_ORDER_MIRRORED_REVERSE == 3 &&
+      sizeof(GhosttySelectionAdjust) == 4 &&
+      GHOSTTY_SELECTION_ADJUST_LEFT == 0 &&
+      GHOSTTY_SELECTION_ADJUST_RIGHT == 1 &&
+      GHOSTTY_SELECTION_ADJUST_UP == 2 &&
+      GHOSTTY_SELECTION_ADJUST_DOWN == 3 &&
+      GHOSTTY_SELECTION_ADJUST_HOME == 4 &&
+      GHOSTTY_SELECTION_ADJUST_END == 5 &&
+      GHOSTTY_SELECTION_ADJUST_PAGE_UP == 6 &&
+      GHOSTTY_SELECTION_ADJUST_PAGE_DOWN == 7 &&
+      GHOSTTY_SELECTION_ADJUST_BEGINNING_OF_LINE == 8 &&
+      GHOSTTY_SELECTION_ADJUST_END_OF_LINE == 9 &&
+      GHOSTTY_FORMATTER_FORMAT_PLAIN == 0 &&
+      GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN == 6 &&
+      GHOSTTY_TERMINAL_DATA_SELECTION == 31 &&
+      GHOSTTY_TERMINAL_OPT_SELECTION == 21 &&
+      terminal_get != NULL && terminal_set != NULL &&
+      terminal_grid_ref != NULL && terminal_grid_ref_track != NULL &&
+      terminal_point_from_grid_ref != NULL && tracked_free != NULL &&
+      tracked_has_value != NULL && tracked_point != NULL &&
+      tracked_set != NULL && tracked_snapshot != NULL && grid_cell != NULL &&
+      grid_row != NULL && grid_graphemes != NULL && grid_hyperlink != NULL &&
+      grid_style != NULL && select_word != NULL &&
+      select_word_between != NULL && select_line != NULL &&
+      select_all != NULL && select_output != NULL && format_alloc != NULL &&
+      selection_adjust != NULL && selection_order != NULL &&
+      selection_contains != NULL;
 }
 
 bool ghostty_racket_snapshot_abi_check(void) {

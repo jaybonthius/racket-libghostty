@@ -19,6 +19,15 @@
          ghostty-racket-mouse-encoder-option-size
          ghostty-racket-size-report-style-size
          ghostty-racket-terminal-continuation-abi-check
+         ghostty-racket-point-value-size
+         ghostty-racket-point-value-align
+         ghostty-racket-selection-format-options-size
+         ghostty-racket-selection-format-options-align
+         ghostty-racket-selection-format-options-emit-offset
+         ghostty-racket-selection-format-options-unwrap-offset
+         ghostty-racket-selection-format-options-trim-offset
+         ghostty-racket-selection-format-options-selection-offset
+         ghostty-racket-selection-abi-check
          ghostty-racket-snapshot-abi-check
          ghostty-racket-render-state-row-selection-size
          ghostty-racket-render-state-row-selection-align
@@ -66,6 +75,25 @@
 (define-ghostty-abi ghostty-racket-terminal-continuation-abi-check
                     (_fun -> _bool)
                     #:c-id ghostty_racket_terminal_continuation_abi_check)
+
+(define-size ghostty-racket-point-value-size ghostty_racket_point_value_size)
+(define-size ghostty-racket-point-value-align ghostty_racket_point_value_align)
+(define-size ghostty-racket-selection-format-options-size
+             ghostty_racket_selection_format_options_size)
+(define-size ghostty-racket-selection-format-options-align
+             ghostty_racket_selection_format_options_align)
+(define-size ghostty-racket-selection-format-options-emit-offset
+             ghostty_racket_selection_format_options_emit_offset)
+(define-size ghostty-racket-selection-format-options-unwrap-offset
+             ghostty_racket_selection_format_options_unwrap_offset)
+(define-size ghostty-racket-selection-format-options-trim-offset
+             ghostty_racket_selection_format_options_trim_offset)
+(define-size ghostty-racket-selection-format-options-selection-offset
+             ghostty_racket_selection_format_options_selection_offset)
+
+(define-ghostty-abi ghostty-racket-selection-abi-check
+                    (_fun -> _bool)
+                    #:c-id ghostty_racket_selection_abi_check)
 
 (define-ghostty-abi ghostty-racket-snapshot-abi-check
                     (_fun -> _bool)

@@ -101,6 +101,66 @@ The caller retains any suffix after the returned count and may later pass it to 
 
 Continuation buffers remain distinct from persistent snapshots. Their public interface deliberately omits caller buffers, borrowed pointers, custom allocators, and transport callbacks.
 
+@subsection{Grid Points and Tracked References}
+
+@defstruct*[terminal-grid-point ([space (or/c 'active 'viewport 'screen 'history)] [x (integer-in 0 65535)] [y (integer-in 0 4294967295)])]{A copied zero-indexed terminal coordinate. Active and viewport coordinates are fast to resolve. Screen and history coordinates may traverse the full scrollback page list. Input points are resolved against the terminal's currently active primary or alternate screen.}
+
+@defproc[(terminal-track-grid-reference [terminal terminal?] [point terminal-grid-point?]) tracked-grid-reference?]{Creates an owned tracked reference to @racket[point]. The reference follows scrolling, scrollback movement, and resize/reflow while the location remains meaningful. Invalid or out-of-range points produce a structured native failure. Each live reference adds native mutation bookkeeping and should be closed when no longer needed.}
+
+@defproc[(tracked-grid-reference? [value any/c]) boolean?]{Reports whether @racket[value] is a tracked grid reference handle.}
+
+@defproc[(tracked-grid-reference-closed? [reference tracked-grid-reference?]) boolean?]{Reports whether @racket[reference] was explicitly closed or finalized. Loss of the tracked location and terminal close do not close the handle.}
+
+@defproc[(tracked-grid-reference-close! [reference tracked-grid-reference?]) void?]{Releases @racket[reference]. Repeated calls are safe. An exactly-once finalizer is the fallback. Closing the reference does not close its terminal.}
+
+@defproc[(tracked-grid-reference-has-value? [reference tracked-grid-reference?]) boolean?]{Reports whether @racket[reference] currently identifies a meaningful location. Reset, destructive pruning, screen removal, or terminal close can produce the open/no-value state.}
+
+@defproc[(tracked-grid-reference-point [reference tracked-grid-reference?] [space (or/c 'active 'viewport 'screen 'history)]) (or/c #f terminal-grid-point?)]{Returns a copied point in @racket[space], or @racket[#f] if the location was lost or is not representable there. The reference remains attached to the primary or alternate page list where it was created or last set, even while that screen is inactive.}
+
+@defproc[(tracked-grid-reference-set! [reference tracked-grid-reference?] [point terminal-grid-point?]) void?]{Moves @racket[reference] to @racket[point] on its creating terminal's currently active screen and restores a lost reference. Native allocation failure leaves the old tracked location unchanged. A terminal closed before this operation raises @racket[exn:fail:ghostty:closed?].}
+
+@defproc[(tracked-grid-reference->snapshot [reference tracked-grid-reference?]) (or/c #f grid-reference-snapshot?)]{Returns one fully copied inspection snapshot, or @racket[#f] if the location was lost or its terminal closed. Cell, row, style, grapheme, hyperlink, point, and screen data are copied under the terminal lock; no untracked grid reference, native node, raw cell, or raw row escapes.}
+
+@defstruct*[grid-reference-snapshot ([screen (or/c 'primary 'alternate)] [point terminal-grid-point?] [cell terminal-grid-cell?] [row terminal-grid-row?])]{A copied view of one tracked location. @racket[point] is in @racket['screen] coordinates relative to @racket[screen].}
+
+@defstruct*[terminal-grid-cell ([codepoint (integer-in 0 4294967295)] [grapheme (and/c string? immutable?)] [width (integer-in 0 2)] [wide (or/c 'narrow 'wide 'spacer-tail 'spacer-head)] [content (or/c 'codepoint 'grapheme 'background-palette 'background-rgb)] [has-text? boolean?] [has-styling? boolean?] [style-id (integer-in 0 65535)] [hyperlink-uri (or/c #f (and/c bytes? immutable?))] [protected? boolean?] [semantic-content (or/c 'output 'input 'prompt)] [content-color (or/c #f render-style-color?)] [style render-style?])]{Copied cell data. An absent hyperlink is @racket[#f], while an explicitly empty URI is immutable empty bytes. Style values reuse the immutable render style representation. Resolved render colors and selected state are intentionally absent because grid-reference inspection cannot produce them honestly.}
+
+@defstruct*[terminal-grid-row ([wrap? boolean?] [wrap-continuation? boolean?] [grapheme? boolean?] [styled? boolean?] [hyperlink? boolean?] [semantic-prompt (or/c 'none 'prompt 'prompt-continuation)] [kitty-virtual-placeholder? boolean?] [dirty? boolean?])]{Copied metadata for the row containing a tracked location.}
+
+An open tracked handle strongly retains its terminal so native detachment cannot race terminal finalization. Explicit @racket[terminal-close!] remains allowed: the tracked handle stays open, reports no value, and can still be closed. Tracked operations share the terminal semaphore and callback policy; there is no second lock and no terminal-close borrow.
+
+@subsection{Active Selections}
+
+@defstruct*[terminal-selection-state ([screen (or/c 'primary 'alternate)] [start terminal-grid-point?] [end terminal-grid-point?] [rectangle? boolean?])]{A copied active-selection description. Endpoints are inclusive, directional, and in @racket['screen] coordinates; start may follow end. Rectangle mode interprets them as opposite block corners. This full-screen state is distinct from the row-local @racket[render-selection-range] projection.}
+
+@defproc[(terminal-selection [terminal terminal?]) (or/c #f terminal-selection-state?)]{Returns the copied active selection on the current screen or @racket[#f]. The binding privately duplicates both endpoints as tracked handles because the pinned native selection getter discards its garbage-pin validity bit. Before selection inspection or rendering, it validates those handles and the native snapshot together and clears the active selection if pruning, screen change, or disagreement made it unsafe.}
+
+@defproc[(terminal-set-selection! [terminal terminal?] [start terminal-grid-point?] [end terminal-grid-point?] [#:rectangle? rectangle? boolean? #f]) void?]{Resolves both points on the active screen and transactionally installs a terminal-owned selection. Temporary untracked references remain inside one serialized call.}
+
+@defproc[(terminal-clear-selection! [terminal terminal?]) void?]{Idempotently clears the current active selection and its private tracked validity handles.}
+
+@defproc[(terminal-select-all! [terminal terminal?]) boolean?]{Derives and installs all selectable active-screen content. @racket[#f] means no selectable result and leaves a previous selection unchanged.}
+
+@defproc[(terminal-select-word! [terminal terminal?] [point terminal-grid-point?] [#:boundary-characters boundary-characters (or/c #f string?) #f]) boolean?]{Derives and installs the word under @racket[point]. @racket[#f] uses Ghostty's default boundary codepoints; an empty string is an explicit empty override. Input characters are copied as Unicode scalar values before native entry.}
+
+@defproc[(terminal-select-word-between! [terminal terminal?] [start terminal-grid-point?] [end terminal-grid-point?] [#:boundary-characters boundary-characters (or/c #f string?) #f]) boolean?]{Derives and installs the nearest selectable word in the inclusive directed range. Boundary handling and the no-result convention match @racket[terminal-select-word!].}
+
+@defproc[(terminal-select-line! [terminal terminal?] [point terminal-grid-point?] [#:whitespace-characters whitespace-characters (or/c #f string?) #f] [#:semantic-prompt-boundary? semantic-prompt-boundary? boolean? #f]) boolean?]{Derives and installs a line selection. @racket[#f] whitespace selects native defaults, an empty string disables codepoint trimming, and semantic boundaries optionally stop at prompt-state changes.}
+
+@defproc[(terminal-select-output! [terminal terminal?] [point terminal-grid-point?]) boolean?]{Derives and installs the OSC 133 semantic command output containing @racket[point]. A point outside selectable output returns @racket[#f] without changing the previous selection.}
+
+@defproc[(terminal-selection-adjust! [terminal terminal?] [adjustment (or/c 'left 'right 'up 'down 'home 'end 'page-up 'page-down 'beginning-of-line 'end-of-line)]) boolean?]{Adjusts the active selection's logical end and reinstalls its tracked state. Returns @racket[#f] when no selection exists.}
+
+@defproc[(terminal-selection-order [terminal terminal?]) (or/c #f 'forward 'reverse 'mirrored-forward 'mirrored-reverse)]{Returns directional endpoint order, including the two diagonal rectangle orders, or @racket[#f] when absent.}
+
+@defproc[(terminal-selection-contains? [terminal terminal?] [point terminal-grid-point?]) boolean?]{Reports whether the active selection contains @racket[point]. An absent selection returns @racket[#f].}
+
+@defproc[(terminal-selection->plain-text [terminal terminal?] [#:unwrap? unwrap? boolean? #t] [#:trim? trim? boolean? #t]) (or/c #f (and/c string? immutable?))]{Copies the active selection as immutable UTF-8 plain text. Defaults match Ghostty clipboard behavior by joining soft wraps and trimming trailing whitespace. @racket[#f] means no active selection and remains distinct from a present selection formatting to immutable @racket[""]. Native allocated output is always released with its matching allocator and exact length.}
+
+Selection tracking follows ordinary scroll and reflow. Reset clears wrapper and native state. Switching screens makes the prior screen selection publicly absent. Persistent snapshots intentionally do not transfer active selection or tracked-reference identity. Derivation, adjustment, order, containment, formatting, and render validation each complete under one terminal lock, so no stale selection snapshot crosses a public call.
+
+Gesture/event handles, browser drag/autoscroll policy, VT and HTML selection formatting, ordered-copy, equality, caller buffers, custom allocators, raw native selectors, and public untracked references are deliberately deferred from this core facility.
+
 @subsection{Buffer-based Snapshots}
 
 A buffer-based snapshot stores persistent terminal state as an unstable pinned-native binary record stream. Version 1 has no compatibility guarantee across Ghostty revisions. Each record has a CRC32C checksum for corruption detection, not authentication; callers must not treat untrusted snapshots as authenticated data. Focus, selection, the scrolled viewport, render dirtiness, host callbacks, and Kitty image storage are not persisted. No native option caps total snapshot bytes or decoded terminal state, so callers must bound untrusted input. The byte-string operations are synchronous, copied, one-shot forms; the port operations below expose the same format without exposing native callbacks.

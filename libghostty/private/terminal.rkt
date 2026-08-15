@@ -7,10 +7,14 @@
          "ffi/common.rkt"
          "ffi/effects.rkt"
          "ffi/formatter.rkt"
+         "ffi/grid-reference.rkt"
          "ffi/io.rkt"
+         "ffi/point.rkt"
          "ffi/render.rkt"
+         "ffi/selection.rkt"
          "ffi/snapshot.rkt"
          "ffi/terminal.rkt"
+         "grid-reference.rkt"
          "render.rkt")
 
 (provide terminal?
@@ -53,6 +57,27 @@
          terminal-set-progress-handler!
          terminal-set-unknown-sequence-handler!
          terminal-set-unknown-max-bytes!
+         tracked-grid-reference?
+         terminal-track-grid-reference
+         tracked-grid-reference-closed?
+         tracked-grid-reference-close!
+         tracked-grid-reference-has-value?
+         tracked-grid-reference-point
+         tracked-grid-reference-set!
+         tracked-grid-reference->snapshot
+         terminal-selection
+         terminal-set-selection!
+         terminal-clear-selection!
+         terminal-select-all!
+         terminal-select-word!
+         terminal-select-word-between!
+         terminal-select-line!
+         terminal-select-output!
+         terminal-selection-adjust!
+         terminal-selection-order
+         terminal-selection-contains?
+         terminal-selection->plain-text
+         (struct-out terminal-selection-state)
          (struct-out snapshot-history)
          (struct-out snapshot-progress)
          (struct-out terminal-size)
@@ -71,8 +96,12 @@
                  effects-state
                  effect-roots
                  snapshot-borrows
+                 [selection-owner #:mutable]
                  finalizer-registered?)
   #:authentic)
+(struct tracked-grid-reference (pointer [terminal #:mutable] [screen #:mutable]) #:authentic)
+(struct active-selection-owner (screen start-tracked end-tracked rectangle?) #:authentic)
+(struct terminal-selection-state (screen start end rectangle?) #:transparent)
 (struct snapshot-decoder
         (pointer lock
                  [state #:mutable]
@@ -112,6 +141,32 @@
 (define snapshot-decoder-progress-rows-data 6)
 (define snapshot-decoder-progress-remaining-data 7)
 (define snapshot-reader-max-chunk-size 65536)
+(define active-screen-data 6)
+(define selection-data 31)
+(define selection-option 21)
+(define screen-values (vector 'primary 'alternate))
+(define selection-order-values (vector 'forward 'reverse 'mirrored-forward 'mirrored-reverse))
+(define selection-adjust-values
+  (hash 'left
+        0
+        'right
+        1
+        'up
+        2
+        'down
+        3
+        'home
+        4
+        'end
+        5
+        'page-up
+        6
+        'page-down
+        7
+        'beginning-of-line
+        8
+        'end-of-line
+        9))
 
 (define (check-callback-reentrancy who value)
   (when (eq? value (current-callback-terminal))
@@ -165,6 +220,13 @@
                              value)))]
     [else (call-with-semaphore (snapshot-decoder-lock value) procedure)]))
 
+(define (release-selection-owner! value)
+  (define owner (terminal-selection-owner value))
+  (when owner
+    (ghostty-tracked-grid-ref-free (active-selection-owner-start-tracked owner))
+    (ghostty-tracked-grid-ref-free (active-selection-owner-end-tracked owner))
+    (set-terminal-selection-owner! value #f)))
+
 (define (release-terminal! value)
   (parameterize-break #f
                       (define pointer-box (terminal-pointer value))
@@ -173,6 +235,7 @@
                         (when pointer
                           (cond
                             [(box-cas! pointer-box pointer #f)
+                             (release-selection-owner! value)
                              (ghostty-render-state-row-cells-free (terminal-row-cells value))
                              (ghostty-render-state-row-iterator-free (terminal-row-iterator value))
                              (ghostty-render-state-free (terminal-render-state value))
@@ -242,6 +305,7 @@
                      effects-state
                      (make-hasheq)
                      snapshot-borrows
+                     #f
                      (box #f)))
      (parameterize-break #f
                          (unless borrow-token
@@ -329,7 +393,9 @@
 (define (terminal-reset! value)
   (call-with-terminal-pointer 'terminal-reset!
                               value
-                              (lambda (pointer) (ghostty-terminal-reset pointer)))
+                              (lambda (pointer)
+                                (ghostty-terminal-reset pointer)
+                                (release-selection-owner! value)))
   (void))
 
 (define (record-handler-raise! operation value)
@@ -1338,6 +1404,473 @@
                            (ghostty-racket-terminal-set-unknown-max-bytes pointer limit))))
   (void))
 
+;; grid references and selections ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (active-screen who pointer)
+  (define output (malloc _int 'atomic))
+  (check-ghostty-result who (ghostty-terminal-get pointer active-screen-data output))
+  (define value (ptr-ref output _int))
+  (unless (< -1 value (vector-length screen-values))
+    (error who "unknown native terminal screen ~a" value))
+  (vector-ref screen-values value))
+
+(define (grid-point->native point)
+  (make-ghostty-point (point-space->native 'terminal-grid-point (terminal-grid-point-space point))
+                      (terminal-grid-point-x point)
+                      (terminal-grid-point-y point)))
+
+(define (resolve-grid-point who pointer point)
+  (define reference (make-ghostty-grid-ref))
+  (check-ghostty-result who (ghostty-terminal-grid-ref pointer (grid-point->native point) reference))
+  reference)
+
+(define (create-tracked-grid-reference-pointer who pointer point)
+  (define output (malloc _pointer))
+  (ptr-set! output _pointer #f)
+  (define result (ghostty-terminal-grid-ref-track/into pointer (grid-point->native point) output))
+  (define tracked (ghostty-terminal-grid-ref-track-output-ref output))
+  (unless (= result GHOSTTY-SUCCESS)
+    (when tracked
+      (ghostty-tracked-grid-ref-free tracked))
+    (check-ghostty-result who result))
+  (unless tracked
+    (error who "native tracked grid reference constructor returned a null handle"))
+  tracked)
+
+(define (release-tracked-grid-reference-under-lock! value)
+  (define pointer-box (tracked-grid-reference-pointer value))
+  (let loop ()
+    (define pointer (unbox pointer-box))
+    (when pointer
+      (cond
+        [(box-cas! pointer-box pointer #f)
+         (ghostty-tracked-grid-ref-free pointer)
+         (set-tracked-grid-reference-terminal! value #f)
+         (void/reference-sink value)]
+        [else (loop)]))))
+
+(define (release-tracked-grid-reference! value)
+  (parameterize-break #f
+                      (define owner (tracked-grid-reference-terminal value))
+                      (cond
+                        [owner
+                         (call-with-semaphore (terminal-lock owner)
+                                              (lambda ()
+                                                (release-tracked-grid-reference-under-lock! value)))]
+                        [else (release-tracked-grid-reference-under-lock! value)])))
+
+(define (terminal-track-grid-reference value point)
+  (call-with-terminal-pointer
+   'terminal-track-grid-reference
+   value
+   (lambda (pointer)
+     (parameterize-break
+      #f
+      (define tracked #f)
+      (define published? #f)
+      (dynamic-wind
+       void
+       (lambda ()
+         (set! tracked
+               (create-tracked-grid-reference-pointer 'terminal-track-grid-reference pointer point))
+         (define result
+           (tracked-grid-reference (box tracked)
+                                   value
+                                   (active-screen 'terminal-track-grid-reference pointer)))
+         (register-finalizer result release-tracked-grid-reference!)
+         (set! published? #t)
+         result)
+       (lambda ()
+         (when (and tracked (not published?))
+           (ghostty-tracked-grid-ref-free tracked))))))))
+
+(define (tracked-grid-reference-closed? value)
+  (not (unbox (tracked-grid-reference-pointer value))))
+
+(define (tracked-grid-reference-close! value)
+  (define owner (tracked-grid-reference-terminal value))
+  (cond
+    [owner
+     (call-with-terminal-lock 'tracked-grid-reference-close!
+                              owner
+                              (lambda () (release-tracked-grid-reference-under-lock! value)))]
+    [else (release-tracked-grid-reference-under-lock! value)])
+  (void))
+
+(define (call-with-open-tracked-grid-reference who value procedure)
+  (define owner (tracked-grid-reference-terminal value))
+  (unless owner
+    (raise-ghostty-closed who 'tracked-grid-reference))
+  (call-with-terminal-lock who
+                           owner
+                           (lambda ()
+                             (define pointer (unbox (tracked-grid-reference-pointer value)))
+                             (unless pointer
+                               (raise-ghostty-closed who 'tracked-grid-reference))
+                             (dynamic-wind void
+                                           (lambda () (procedure owner pointer))
+                                           (lambda () (void/reference-sink value))))))
+
+(define (tracked-grid-reference-has-value? value)
+  (call-with-open-tracked-grid-reference 'tracked-grid-reference-has-value?
+                                         value
+                                         (lambda (_owner pointer)
+                                           (ghostty-tracked-grid-ref-has-value pointer))))
+
+(define (tracked-grid-reference-point value space)
+  (call-with-open-tracked-grid-reference
+   'tracked-grid-reference-point
+   value
+   (lambda (_owner pointer)
+     (define output (make-GhosttyPointCoordinate 0 0))
+     (define result
+       (ghostty-tracked-grid-ref-point pointer
+                                       (point-space->native 'tracked-grid-reference-point space)
+                                       output))
+     (cond
+       [(= result GHOSTTY-NO-VALUE) #f]
+       [else
+        (check-ghostty-result 'tracked-grid-reference-point result)
+        (terminal-grid-point space
+                             (GhosttyPointCoordinate-x output)
+                             (GhosttyPointCoordinate-y output))]))))
+
+(define (tracked-grid-reference-set! value point)
+  (call-with-open-tracked-grid-reference
+   'tracked-grid-reference-set!
+   value
+   (lambda (owner pointer)
+     (define native-terminal (unbox (terminal-pointer owner)))
+     (unless native-terminal
+       (raise-terminal-closed 'tracked-grid-reference-set!))
+     (check-ghostty-result
+      'tracked-grid-reference-set!
+      (ghostty-tracked-grid-ref-set pointer native-terminal (grid-point->native point)))
+     (set-tracked-grid-reference-screen! value
+                                         (active-screen 'tracked-grid-reference-set!
+                                                        native-terminal))))
+  (void))
+
+(define (tracked-grid-reference->snapshot value)
+  (call-with-open-tracked-grid-reference
+   'tracked-grid-reference->snapshot
+   value
+   (lambda (owner pointer)
+     (define native-terminal (unbox (terminal-pointer owner)))
+     (cond
+       [(not native-terminal) #f]
+       [else
+        (define reference (make-ghostty-grid-ref))
+        (define result (ghostty-tracked-grid-ref-snapshot pointer reference))
+        (cond
+          [(= result GHOSTTY-NO-VALUE) #f]
+          [else
+           (check-ghostty-result 'tracked-grid-reference->snapshot result)
+           (copy-grid-reference-snapshot 'tracked-grid-reference->snapshot
+                                         native-terminal
+                                         reference
+                                         (tracked-grid-reference-screen value))])]))))
+
+(define (selection-endpoint->screen-point who pointer reference)
+  (define output (make-GhosttyPointCoordinate 0 0))
+  (check-ghostty-result who (ghostty-terminal-point-from-grid-ref pointer reference 2 output))
+  (terminal-grid-point 'screen (GhosttyPointCoordinate-x output) (GhosttyPointCoordinate-y output)))
+
+(define (tracked-endpoint->screen-point who tracked)
+  (define output (make-GhosttyPointCoordinate 0 0))
+  (define result (ghostty-tracked-grid-ref-point tracked 2 output))
+  (cond
+    [(= result GHOSTTY-NO-VALUE) #f]
+    [else
+     (check-ghostty-result who result)
+     (terminal-grid-point 'screen
+                          (GhosttyPointCoordinate-x output)
+                          (GhosttyPointCoordinate-y output))]))
+
+(define (same-grid-point? first second)
+  (and first
+       second
+       (eq? (terminal-grid-point-space first) (terminal-grid-point-space second))
+       (= (terminal-grid-point-x first) (terminal-grid-point-x second))
+       (= (terminal-grid-point-y first) (terminal-grid-point-y second))))
+
+(define (clear-selection-under-lock! who value pointer)
+  (check-ghostty-result who (ghostty-terminal-set pointer selection-option #f))
+  (release-selection-owner! value))
+
+(define (install-selection-under-lock! who value pointer selection)
+  (parameterize-break
+   #f
+   (define screen (active-screen who pointer))
+   (define start-point
+     (selection-endpoint->screen-point who pointer (GhosttySelection-start selection)))
+   (define end-point (selection-endpoint->screen-point who pointer (GhosttySelection-end selection)))
+   (define start-tracked #f)
+   (define end-tracked #f)
+   (define published? #f)
+   (dynamic-wind
+    void
+    (lambda ()
+      (set! start-tracked (create-tracked-grid-reference-pointer who pointer start-point))
+      (set! end-tracked (create-tracked-grid-reference-pointer who pointer end-point))
+      (define fresh-start (resolve-grid-point who pointer start-point))
+      (define fresh-end (resolve-grid-point who pointer end-point))
+      (define fresh-selection
+        (make-GhosttySelection (ctype-sizeof _GhosttySelection)
+                               fresh-start
+                               fresh-end
+                               (GhosttySelection-rectangle selection)))
+      (check-ghostty-result who (ghostty-terminal-set pointer selection-option fresh-selection))
+      (release-selection-owner! value)
+      (set-terminal-selection-owner! value
+                                     (active-selection-owner screen
+                                                             start-tracked
+                                                             end-tracked
+                                                             (GhosttySelection-rectangle selection)))
+      (set! published? #t))
+    (lambda ()
+      (unless published?
+        (when start-tracked
+          (ghostty-tracked-grid-ref-free start-tracked))
+        (when end-tracked
+          (ghostty-tracked-grid-ref-free end-tracked)))))))
+
+(define (valid-selection-under-lock who value pointer)
+  (define owner (terminal-selection-owner value))
+  (cond
+    [(not owner) #f]
+    [else
+     (define valid-screen? (eq? (active-selection-owner-screen owner) (active-screen who pointer)))
+     (define valid-start?
+       (ghostty-tracked-grid-ref-has-value (active-selection-owner-start-tracked owner)))
+     (define valid-end?
+       (ghostty-tracked-grid-ref-has-value (active-selection-owner-end-tracked owner)))
+     (define native-selection (make-ghostty-selection))
+     (define native-result (ghostty-terminal-get pointer selection-data native-selection))
+     (define valid-native? (= native-result GHOSTTY-SUCCESS))
+     (define matches?
+       (and valid-screen?
+            valid-start?
+            valid-end?
+            valid-native?
+            (equal? (active-selection-owner-rectangle? owner)
+                    (GhosttySelection-rectangle native-selection))
+            (same-grid-point?
+             (tracked-endpoint->screen-point who (active-selection-owner-start-tracked owner))
+             (selection-endpoint->screen-point who pointer (GhosttySelection-start native-selection)))
+            (same-grid-point?
+             (tracked-endpoint->screen-point who (active-selection-owner-end-tracked owner))
+             (selection-endpoint->screen-point who pointer (GhosttySelection-end native-selection)))))
+     (cond
+       [matches? native-selection]
+       [else
+        (unless (or valid-native? (= native-result GHOSTTY-NO-VALUE))
+          (check-ghostty-result who native-result))
+        (clear-selection-under-lock! who value pointer)
+        #f])]))
+
+(define (terminal-selection value)
+  (call-with-terminal-pointer
+   'terminal-selection
+   value
+   (lambda (pointer)
+     (define selection (valid-selection-under-lock 'terminal-selection value pointer))
+     (and selection
+          (let ([owner (terminal-selection-owner value)])
+            (terminal-selection-state
+             (active-selection-owner-screen owner)
+             (tracked-endpoint->screen-point 'terminal-selection
+                                             (active-selection-owner-start-tracked owner))
+             (tracked-endpoint->screen-point 'terminal-selection
+                                             (active-selection-owner-end-tracked owner))
+             (active-selection-owner-rectangle? owner)))))))
+
+(define (terminal-set-selection! value start end #:rectangle? [rectangle? #f])
+  (call-with-terminal-pointer
+   'terminal-set-selection!
+   value
+   (lambda (pointer)
+     (define selection
+       (make-GhosttySelection (ctype-sizeof _GhosttySelection)
+                              (resolve-grid-point 'terminal-set-selection! pointer start)
+                              (resolve-grid-point 'terminal-set-selection! pointer end)
+                              rectangle?))
+     (install-selection-under-lock! 'terminal-set-selection! value pointer selection)))
+  (void))
+
+(define (terminal-clear-selection! value)
+  (call-with-terminal-pointer
+   'terminal-clear-selection!
+   value
+   (lambda (pointer) (clear-selection-under-lock! 'terminal-clear-selection! value pointer)))
+  (void))
+
+(define (codepoint-string->pointer text)
+  (cond
+    [(not text) (values #f 0)]
+    [else
+     (define length (string-length text))
+     (define pointer (malloc _uint32 (max 1 length) 'atomic))
+     (for ([character (in-string text)]
+           [index (in-naturals)])
+       (ptr-set! pointer _uint32 index (char->integer character)))
+     (values pointer length)]))
+
+(define (derive-and-install-selection! who value derive)
+  (call-with-terminal-pointer who
+                              value
+                              (lambda (pointer)
+                                (define selection (make-ghostty-selection))
+                                (define result (derive pointer selection))
+                                (cond
+                                  [(= result GHOSTTY-NO-VALUE) #f]
+                                  [else
+                                   (check-ghostty-result who result)
+                                   (install-selection-under-lock! who value pointer selection)
+                                   #t]))))
+
+(define (terminal-select-all! value)
+  (derive-and-install-selection! 'terminal-select-all!
+                                 value
+                                 (lambda (pointer selection)
+                                   (ghostty-terminal-select-all pointer selection))))
+
+(define (terminal-select-word! value point #:boundary-characters [boundary-characters #f])
+  (derive-and-install-selection! 'terminal-select-word!
+                                 value
+                                 (lambda (pointer selection)
+                                   (define-values (boundaries length)
+                                     (codepoint-string->pointer boundary-characters))
+                                   (define options
+                                     (make-GhosttyTerminalSelectWordOptions
+                                      (ctype-sizeof _GhosttyTerminalSelectWordOptions)
+                                      (resolve-grid-point 'terminal-select-word! pointer point)
+                                      boundaries
+                                      length))
+                                   (ghostty-terminal-select-word pointer options selection))))
+
+(define (terminal-select-word-between! value start end #:boundary-characters [boundary-characters #f])
+  (derive-and-install-selection!
+   'terminal-select-word-between!
+   value
+   (lambda (pointer selection)
+     (define-values (boundaries length) (codepoint-string->pointer boundary-characters))
+     (define options
+       (make-GhosttyTerminalSelectWordBetweenOptions
+        (ctype-sizeof _GhosttyTerminalSelectWordBetweenOptions)
+        (resolve-grid-point 'terminal-select-word-between! pointer start)
+        (resolve-grid-point 'terminal-select-word-between! pointer end)
+        boundaries
+        length))
+     (ghostty-terminal-select-word-between pointer options selection))))
+
+(define (terminal-select-line! value
+                               point
+                               #:whitespace-characters [whitespace-characters #f]
+                               #:semantic-prompt-boundary? [semantic-prompt-boundary? #f])
+  (derive-and-install-selection! 'terminal-select-line!
+                                 value
+                                 (lambda (pointer selection)
+                                   (define-values (whitespace length)
+                                     (codepoint-string->pointer whitespace-characters))
+                                   (define options
+                                     (make-GhosttyTerminalSelectLineOptions
+                                      (ctype-sizeof _GhosttyTerminalSelectLineOptions)
+                                      (resolve-grid-point 'terminal-select-line! pointer point)
+                                      whitespace
+                                      length
+                                      semantic-prompt-boundary?))
+                                   (ghostty-terminal-select-line pointer options selection))))
+
+(define (terminal-select-output! value point)
+  (derive-and-install-selection! 'terminal-select-output!
+                                 value
+                                 (lambda (pointer selection)
+                                   (ghostty-terminal-select-output
+                                    pointer
+                                    (resolve-grid-point 'terminal-select-output! pointer point)
+                                    selection))))
+
+(define (terminal-selection-adjust! value adjustment)
+  (call-with-terminal-pointer
+   'terminal-selection-adjust!
+   value
+   (lambda (pointer)
+     (define selection (valid-selection-under-lock 'terminal-selection-adjust! value pointer))
+     (cond
+       [(not selection) #f]
+       [else
+        (check-ghostty-result 'terminal-selection-adjust!
+                              (ghostty-terminal-selection-adjust pointer
+                                                                 selection
+                                                                 (hash-ref selection-adjust-values
+                                                                           adjustment)))
+        (install-selection-under-lock! 'terminal-selection-adjust! value pointer selection)
+        #t]))))
+
+(define (terminal-selection-order value)
+  (call-with-terminal-pointer
+   'terminal-selection-order
+   value
+   (lambda (pointer)
+     (define selection (valid-selection-under-lock 'terminal-selection-order value pointer))
+     (cond
+       [(not selection) #f]
+       [else
+        (define output (malloc _int 'atomic))
+        (check-ghostty-result 'terminal-selection-order
+                              (ghostty-terminal-selection-order pointer selection output))
+        (define order (ptr-ref output _int))
+        (unless (< -1 order (vector-length selection-order-values))
+          (error 'terminal-selection-order "unknown native selection order ~a" order))
+        (vector-ref selection-order-values order)]))))
+
+(define (terminal-selection-contains? value point)
+  (call-with-terminal-pointer
+   'terminal-selection-contains?
+   value
+   (lambda (pointer)
+     (define selection (valid-selection-under-lock 'terminal-selection-contains? value pointer))
+     (cond
+       [(not selection) #f]
+       [else
+        (define output (malloc _stdbool 'atomic))
+        (check-ghostty-result
+         'terminal-selection-contains?
+         (ghostty-terminal-selection-contains pointer selection (grid-point->native point) output))
+        (ptr-ref output _stdbool)]))))
+
+(define (terminal-selection->plain-text value #:unwrap? [unwrap? #t] #:trim? [trim? #t])
+  (call-with-terminal-pointer
+   'terminal-selection->plain-text
+   value
+   (lambda (pointer)
+     (define selection (valid-selection-under-lock 'terminal-selection->plain-text value pointer))
+     (cond
+       [(not selection) #f]
+       [else
+        (define options
+          (make-GhosttyTerminalSelectionFormatOptions
+           (ctype-sizeof _GhosttyTerminalSelectionFormatOptions)
+           0
+           unwrap?
+           trim?
+           selection))
+        (define output #f)
+        (define length 0)
+        (dynamic-wind void
+                      (lambda ()
+                        (define-values (result new-output new-length)
+                          (ghostty-terminal-selection-format-alloc pointer options))
+                        (set! output new-output)
+                        (set! length new-length)
+                        (check-ghostty-result 'terminal-selection->plain-text result)
+                        (define bytes (make-bytes length))
+                        (when (positive? length)
+                          (memcpy bytes output length))
+                        (string->immutable-string (bytes->string/utf-8 bytes)))
+                      (lambda () (ghostty-free #f output length)))]))))
+
 (define (make-plain-text-options)
   (define screen
     (make-GhosttyFormatterScreenExtra (ctype-sizeof _GhosttyFormatterScreenExtra) #f #f #f #f #f #f))
@@ -1394,47 +1927,8 @@
   (call-with-terminal-pointer 'terminal-render-snapshot
                               value
                               (lambda (pointer)
+                                (valid-selection-under-lock 'terminal-render-snapshot value pointer)
                                 (copy-terminal-render-snapshot pointer
                                                                (terminal-render-state value)
                                                                (terminal-row-iterator value)
                                                                (terminal-row-cells value)))))
-
-(module* test-support #f
-  (require "ffi/selection-test.rkt")
-
-  (define (layout-value layouts type part)
-    (hash-ref (hash-ref layouts type) part))
-
-  (define (field-offset layouts type field)
-    (hash-ref (hash-ref (layout-value layouts type 'fields) field) 'offset))
-
-  (define (check-selection-test-abi!)
-    (define layouts (libghostty-type-layouts))
-    (unless (and (= (ctype-sizeof _GhosttyGridRef) (layout-value layouts 'GhosttyGridRef 'size))
-                 (= (ctype-alignof _GhosttyGridRef) (layout-value layouts 'GhosttyGridRef 'align))
-                 (= (ctype-sizeof _GhosttySelection) (layout-value layouts 'GhosttySelection 'size))
-                 (= (ctype-alignof _GhosttySelection) (layout-value layouts 'GhosttySelection 'align))
-                 (= 0 (field-offset layouts 'GhosttyGridRef 'size))
-                 (= 8 (field-offset layouts 'GhosttyGridRef 'node))
-                 (= 16 (field-offset layouts 'GhosttyGridRef 'x))
-                 (= 18 (field-offset layouts 'GhosttyGridRef 'y))
-                 (= 0 (field-offset layouts 'GhosttySelection 'size))
-                 (= 8 (field-offset layouts 'GhosttySelection 'start))
-                 (= 32 (field-offset layouts 'GhosttySelection 'end))
-                 (= 56 (field-offset layouts 'GhosttySelection 'rectangle)))
-      (error 'terminal-test-select-all! "selection test-support ABI mismatch")))
-
-  (define (terminal-test-select-all! value)
-    (check-selection-test-abi!)
-    (call-with-terminal-pointer
-     'terminal-test-select-all!
-     value
-     (lambda (pointer)
-       (define selection (malloc _GhosttySelection 'atomic))
-       (ptr-set! selection _size 0 (ctype-sizeof _GhosttySelection))
-       (check-ghostty-result 'terminal-test-select-all!
-                             (ghostty-terminal-select-all pointer selection))
-       (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-set pointer 21 selection))))
-    (void))
-
-  (provide terminal-test-select-all!))

@@ -8,10 +8,13 @@
          "ffi/device.rkt"
          "ffi/effects.rkt"
          "ffi/formatter.rkt"
+         "ffi/grid-reference.rkt"
          "ffi/io.rkt"
          "ffi/mouse-encoder.rkt"
          "ffi/mouse-event.rkt"
+         "ffi/point.rkt"
          "ffi/render.rkt"
+         "ffi/selection.rkt"
          "ffi/sgr.rkt"
          "ffi/size-report.rkt"
          "ffi/style.rkt"
@@ -126,6 +129,37 @@
                (cons 'columns _uint16)
                (cons 'cell_width _uint32)
                (cons 'cell_height _uint32)))
+   (list 'GhosttyPointCoordinate _GhosttyPointCoordinate (list (cons 'x _uint16) (cons 'y _uint32)))
+   (list 'GhosttyPoint _GhosttyPoint (list (cons 'tag _int) (cons 'value _GhosttyPointValue)))
+   (list 'GhosttyGridRef
+         _GhosttyGridRef
+         (list (cons 'size _size) (cons 'node _pointer) (cons 'x _uint16) (cons 'y _uint16)))
+   (list 'GhosttySelection
+         _GhosttySelection
+         (list (cons 'size _size)
+               (cons 'start _GhosttyGridRef)
+               (cons 'end _GhosttyGridRef)
+               (cons 'rectangle _stdbool)))
+   (list 'GhosttyTerminalSelectWordOptions
+         _GhosttyTerminalSelectWordOptions
+         (list (cons 'size _size)
+               (cons 'ref _GhosttyGridRef)
+               (cons 'boundary_codepoints _pointer)
+               (cons 'boundary_codepoints_len _size)))
+   (list 'GhosttyTerminalSelectWordBetweenOptions
+         _GhosttyTerminalSelectWordBetweenOptions
+         (list (cons 'size _size)
+               (cons 'start _GhosttyGridRef)
+               (cons 'end _GhosttyGridRef)
+               (cons 'boundary_codepoints _pointer)
+               (cons 'boundary_codepoints_len _size)))
+   (list 'GhosttyTerminalSelectLineOptions
+         _GhosttyTerminalSelectLineOptions
+         (list (cons 'size _size)
+               (cons 'ref _GhosttyGridRef)
+               (cons 'whitespace _pointer)
+               (cons 'whitespace_len _size)
+               (cons 'semantic_prompt_boundary _stdbool)))
    (list 'GhosttyTerminalModeConfig
          _GhosttyTerminalModeConfig
          (list (cons 'mode _uint16) (cons 'value _stdbool)))
@@ -251,6 +285,39 @@
                       (ctype-alignof _GhosttyStyleColorValue)
                       (ghostty-racket-style-color-value-align)))
 
+(define (check-probed-selection-layouts)
+  (check-equal-layout 'GhosttyPointValue
+                      'size
+                      (ctype-sizeof _GhosttyPointValue)
+                      (ghostty-racket-point-value-size))
+  (check-equal-layout 'GhosttyPointValue
+                      'alignment
+                      (ctype-alignof _GhosttyPointValue)
+                      (ghostty-racket-point-value-align))
+  (check-equal-layout 'GhosttyTerminalSelectionFormatOptions
+                      'size
+                      (ctype-sizeof _GhosttyTerminalSelectionFormatOptions)
+                      (ghostty-racket-selection-format-options-size))
+  (check-equal-layout 'GhosttyTerminalSelectionFormatOptions
+                      'alignment
+                      (ctype-alignof _GhosttyTerminalSelectionFormatOptions)
+                      (ghostty-racket-selection-format-options-align))
+  (define offsets
+    (field-offsets (list (cons 'size _size)
+                         (cons 'emit _int)
+                         (cons 'unwrap _stdbool)
+                         (cons 'trim _stdbool)
+                         (cons 'selection _pointer))))
+  (for ([entry (in-list (list (cons 'emit ghostty-racket-selection-format-options-emit-offset)
+                              (cons 'unwrap ghostty-racket-selection-format-options-unwrap-offset)
+                              (cons 'trim ghostty-racket-selection-format-options-trim-offset)
+                              (cons 'selection
+                                    ghostty-racket-selection-format-options-selection-offset)))])
+    (check-equal-layout 'GhosttyTerminalSelectionFormatOptions
+                        (format "field ~a offset" (car entry))
+                        (hash-ref offsets (car entry))
+                        ((cdr entry)))))
+
 (define (check-probed-sgr-layouts)
   (check-equal-layout 'GhosttySgrUnknown
                       'size
@@ -334,10 +401,13 @@
     (for-each check-declaration declarations)
     (check-input-scalar-layouts)
     (check-probed-render-layouts)
+    (check-probed-selection-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)
     (unless (ghostty-racket-terminal-continuation-abi-check)
       (error 'check-libghostty-abi! "terminal continuation ABI mismatch"))
+    (unless (ghostty-racket-selection-abi-check)
+      (error 'check-libghostty-abi! "selection or tracked grid reference ABI mismatch"))
     (unless (ghostty-racket-snapshot-abi-check)
       (error 'check-libghostty-abi! "snapshot ABI mismatch"))
     (unless (ghostty-racket-terminal-effects-abi-check)
