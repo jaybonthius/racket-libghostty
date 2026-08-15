@@ -6,6 +6,7 @@
          "private/build-info.rkt"
          "private/color.rkt"
          "private/error.rkt"
+         "private/input.rkt"
          "private/parsers.rkt"
          "private/render.rkt"
          "private/terminal.rkt"
@@ -50,6 +51,99 @@
           [terminal-write! (-> terminal? bytes? void?)]
           [terminal->plain-text (-> terminal? string?)]
           [terminal-render-snapshot (-> terminal? render-snapshot?)]
+          [physical-key? (-> any/c boolean?)]
+          [key-event? (-> any/c boolean?)]
+          [key-event
+           (->* [(or/c 'release 'press 'repeat) physical-key?]
+                [#:modifiers modifier-list?
+                 #:consumed-modifiers modifier-list?
+                 #:text key-text?
+                 #:unshifted-codepoint (or/c #f char?)
+                 #:composing? boolean?]
+                key-event?)]
+          [key-event-action (-> key-event? (or/c 'release 'press 'repeat))]
+          [key-event-key (-> key-event? physical-key?)]
+          [key-event-modifiers (-> key-event? modifier-list?)]
+          [key-event-consumed-modifiers (-> key-event? modifier-list?)]
+          [key-event-text (-> key-event? key-text?)]
+          [key-event-unshifted-codepoint (-> key-event? (or/c #f char?))]
+          [key-event-composing? (-> key-event? boolean?)]
+          [key-encoder? (-> any/c boolean?)]
+          [make-key-encoder
+           (->* [] [#:macos-option-as-alt (or/c 'false 'true 'left 'right)] key-encoder?)]
+          [key-encoder-closed? (-> key-encoder? boolean?)]
+          [key-encoder-close! (-> key-encoder? void?)]
+          [key-encoder-sync-terminal! (-> key-encoder? terminal? void?)]
+          [key-encoder-set-options!
+           (->* [key-encoder?]
+                [#:cursor-key-application? boolean?
+                 #:keypad-key-application? boolean?
+                 #:ignore-keypad-with-numlock? boolean?
+                 #:alt-esc-prefix? boolean?
+                 #:modify-other-keys? boolean?
+                 #:kitty-flags kitty-flag-list?
+                 #:macos-option-as-alt (or/c 'false 'true 'left 'right)
+                 #:backarrow-key-mode? boolean?]
+                void?)]
+          [key-encoder-encode
+           (->* [key-encoder? key-event?] [#:terminal (or/c #f terminal?)] (and/c bytes? immutable?))]
+          [mouse-event? (-> any/c boolean?)]
+          [mouse-event
+           (->*
+            [(or/c 'press 'release 'motion)
+             (or/c #f 'unknown 'left 'right 'middle 'four 'five 'six 'seven 'eight 'nine 'ten 'eleven)
+             finite-coordinate?
+             finite-coordinate?]
+            [#:modifiers modifier-list?]
+            mouse-event?)]
+          [mouse-event-action (-> mouse-event? (or/c 'press 'release 'motion))]
+          [mouse-event-button
+           (-> mouse-event?
+               (or/c #f
+                     'unknown
+                     'left
+                     'right
+                     'middle
+                     'four
+                     'five
+                     'six
+                     'seven
+                     'eight
+                     'nine
+                     'ten
+                     'eleven))]
+          [mouse-event-x (-> mouse-event? finite-coordinate?)]
+          [mouse-event-y (-> mouse-event? finite-coordinate?)]
+          [mouse-event-modifiers (-> mouse-event? modifier-list?)]
+          (struct mouse-encoder-size
+                  ([screen-width (integer-in 0 4294967295)] [screen-height (integer-in 0 4294967295)]
+                                                            [cell-width (integer-in 1 4294967295)]
+                                                            [cell-height (integer-in 1 4294967295)]
+                                                            [padding-top (integer-in 0 4294967295)]
+                                                            [padding-bottom (integer-in 0 4294967295)]
+                                                            [padding-right (integer-in 0 4294967295)]
+                                                            [padding-left (integer-in 0 4294967295)]))
+          [mouse-encoder? (-> any/c boolean?)]
+          [make-mouse-encoder
+           (->* [#:size mouse-encoder-size?] [#:deduplicate-motion? boolean?] mouse-encoder?)]
+          [mouse-encoder-closed? (-> mouse-encoder? boolean?)]
+          [mouse-encoder-close! (-> mouse-encoder? void?)]
+          [mouse-encoder-sync-terminal! (-> mouse-encoder? terminal? void?)]
+          [mouse-encoder-set-options!
+           (->* [mouse-encoder?]
+                [#:tracking (or/c 'disabled 'x10 'normal 'button 'any)
+                 #:format (or/c 'x10 'utf8 'sgr 'urxvt 'sgr-pixels)
+                 #:size mouse-encoder-size?
+                 #:any-button-pressed? boolean?
+                 #:deduplicate-motion? boolean?]
+                void?)]
+          [mouse-encoder-set-size! (-> mouse-encoder? mouse-encoder-size? void?)]
+          [mouse-encoder-set-any-button-pressed! (-> mouse-encoder? boolean? void?)]
+          [mouse-encoder-reset! (-> mouse-encoder? void?)]
+          [mouse-encoder-encode
+           (->* [mouse-encoder? mouse-event?]
+                [#:terminal (or/c #f terminal?)]
+                (and/c bytes? immutable?))]
           (struct render-snapshot
                   ([columns (integer-in 0 65535)] [rows (integer-in 0 65535)]
                                                   [dirty (or/c 'clean 'partial 'full)]
@@ -140,6 +234,13 @@
           [focus-encode (-> (or/c 'gained 'lost) (and/c bytes? immutable?))]
           [paste-safe? (-> bytes? boolean?)]
           [paste-encode (->* [bytes?] [#:bracketed? boolean?] (and/c bytes? immutable?))]
+          [size-report-encode
+           (-> (or/c 'mode-2048 'csi-14-t 'csi-16-t 'csi-18-t)
+               (integer-in 0 65535)
+               (integer-in 0 65535)
+               (integer-in 0 4294967295)
+               (integer-in 0 4294967295)
+               (and/c bytes? immutable?))]
           [unicode-codepoint-width (-> (integer-in 0 4294967295) (integer-in 0 2))]
           [unicode-grapheme-width
            (-> (vectorof (integer-in 0 4294967295))
@@ -150,6 +251,7 @@
            (-> terminal-mode?
                (or/c 'not-recognized 'set 'reset 'permanently-set 'permanently-reset)
                (and/c bytes? immutable?))]
+          [terminal-mode-enabled? (-> terminal? terminal-mode? boolean?)]
           (struct primary-device-attributes
                   ([conformance-level (integer-in 0 65535)] [features (and/c vector? immutable?)]))
           (struct secondary-device-attributes

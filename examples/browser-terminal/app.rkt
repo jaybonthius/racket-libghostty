@@ -1,9 +1,13 @@
 #lang racket/base
 
 (require datastar
+         json
          libghostty
          racket/async-channel
+         racket/file
+         racket/list
          racket/match
+         racket/runtime-path
          racket/string
          web-server/dispatch
          web-server/http
@@ -17,6 +21,7 @@
          browser-session-snapshot
          browser-session-wait
          browser-session-close!
+         browser-session-handle-command!
          render-snapshot-xexpr
          make-browser-terminal-app
          serve-browser-terminal)
@@ -28,8 +33,25 @@
 (define terminal-stylesheet
   ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap}.terminal-row{display:block;block-size:1lh;line-height:1}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:1ch;min-inline-size:1ch;block-size:1lh;line-height:1;overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:2ch;min-inline-size:2ch}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}")
 
-(struct browser-session (terminal process master changes done error close-lock closed? finished?)
+(struct browser-session
+        (terminal key-encoder
+                  mouse-encoder
+                  process
+                  master
+                  master-output
+                  state-lock
+                  pressed-buttons
+                  last-sequence
+                  geometry
+                  changes
+                  done
+                  error
+                  close-lock
+                  closed?
+                  finished?)
   #:authentic)
+
+(define-runtime-path input-adapter.js "input-adapter.js")
 
 (define (signal-change! session value)
   (async-channel-put (browser-session-changes session) value))
@@ -57,7 +79,10 @@
                     (let loop ()
                       (define count (read-bytes-avail! buffer master))
                       (unless (eof-object? count)
-                        (terminal-write! (browser-session-terminal session) (subbytes buffer 0 count))
+                        (call-with-semaphore (browser-session-state-lock session)
+                                             (lambda ()
+                                               (terminal-write! (browser-session-terminal session)
+                                                                (subbytes buffer 0 count))))
                         (signal-change! session 'changed)
                         (loop))))
                   (with-handlers ([exn:fail? (lambda (error)
@@ -75,8 +100,13 @@
 
 (define (make-browser-session)
   (define terminal (make-terminal terminal-columns terminal-rows))
-  (define-values (process master)
+  (define key-encoder (make-key-encoder))
+  (define geometry (mouse-encoder-size 800 480 10 20 0 0 0 0))
+  (define mouse-encoder (make-mouse-encoder #:size geometry))
+  (define-values (process master master-output)
     (with-handlers ([exn? (lambda (error)
+                            (mouse-encoder-close! mouse-encoder)
+                            (key-encoder-close! key-encoder)
                             (terminal-close! terminal)
                             (raise error))])
       (spawn-pty-command
@@ -88,12 +118,19 @@
         "/bin/sh"
         "-c"
         (format
-         "if exec 3<>/dev/tty; then sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
+         "if exec 3<>/dev/tty; then printf '\\033[?1h\\033[?1000h\\033[?1006h\\033[?2004h'; sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
          workflow-marker)))))
   (define session
     (browser-session terminal
+                     key-encoder
+                     mouse-encoder
                      process
                      master
+                     master-output
+                     (make-semaphore 1)
+                     (box '())
+                     (box 0)
+                     (box geometry)
                      (make-async-channel)
                      (make-semaphore 0)
                      (box #f)
@@ -130,12 +167,336 @@
                              (terminate-pty-process! (browser-session-process session)))
                            (with-handlers ([exn:fail? void])
                              (close-input-port (browser-session-master session)))
+                           (with-handlers ([exn:fail? void])
+                             (close-output-port (browser-session-master-output session)))
                            (with-handlers ([exn:fail? (lambda (error)
                                                         (unless failure
                                                           (set! failure error)))])
+                             (mouse-encoder-close! (browser-session-mouse-encoder session))
+                             (key-encoder-close! (browser-session-key-encoder session))
                              (terminal-close! (browser-session-terminal session)))
                            (finish-session! session failure))))
   (void))
+
+(define named-browser-keys
+  (hash "ArrowDown"
+        'arrow-down
+        "ArrowLeft"
+        'arrow-left
+        "ArrowRight"
+        'arrow-right
+        "ArrowUp"
+        'arrow-up
+        "Backspace"
+        'backspace
+        "Delete"
+        'delete
+        "End"
+        'end
+        "Enter"
+        'enter
+        "Escape"
+        'escape
+        "Home"
+        'home
+        "Insert"
+        'insert
+        "LaunchApp1"
+        'launch-app-1
+        "LaunchApp2"
+        'launch-app-2
+        "PageDown"
+        'page-down
+        "PageUp"
+        'page-up
+        "Space"
+        'space
+        "Tab"
+        'tab
+        "ControlLeft"
+        'control-left
+        "ControlRight"
+        'control-right
+        "ShiftLeft"
+        'shift-left
+        "ShiftRight"
+        'shift-right
+        "AltLeft"
+        'alt-left
+        "AltRight"
+        'alt-right
+        "MetaLeft"
+        'meta-left
+        "MetaRight"
+        'meta-right))
+
+(define (browser-code->key code)
+  (cond
+    [(hash-ref named-browser-keys code #f)
+     =>
+     values]
+    [(regexp-match #rx"^Key([A-Z])$" code)
+     =>
+     (lambda (match) (string->symbol (string-downcase (cadr match))))]
+    [(regexp-match #rx"^Digit([0-9])$" code)
+     =>
+     (lambda (match) (string->symbol (format "digit-~a" (cadr match))))]
+    [(regexp-match #rx"^Numpad([0-9])$" code)
+     =>
+     (lambda (match) (string->symbol (format "numpad-~a" (cadr match))))]
+    [(regexp-match #rx"^F([1-9]|1[0-9]|2[0-5])$" code)
+     =>
+     (lambda (match) (string->symbol (string-downcase (car match))))]
+    [else
+     (string->symbol (string-downcase (regexp-replace* #rx"([a-z0-9])([A-Z])" code "\\1-\\2")))]))
+
+(define wire-key-aliases
+  (hash 'shift?
+        'shift
+        'ctrl?
+        'ctrl
+        'alt?
+        'alt
+        'meta?
+        'meta
+        'caps-lock?
+        'capsLock
+        'num-lock?
+        'numLock
+        'composing?
+        'composing
+        'screen-width
+        'screenWidth
+        'screen-height
+        'screenHeight
+        'cell-width
+        'cellWidth
+        'cell-height
+        'cellHeight
+        'padding-top
+        'paddingTop
+        'padding-bottom
+        'paddingBottom
+        'padding-right
+        'paddingRight
+        'padding-left
+        'paddingLeft
+        'delta-x
+        'deltaX
+        'delta-y
+        'deltaY
+        'delta-mode
+        'deltaMode))
+
+(define (command-ref command
+                     key
+                     [failure (lambda () (error 'browser-session-handle-command! "missing ~a" key))])
+  (define alias (hash-ref wire-key-aliases key key))
+  (hash-ref
+   command
+   key
+   (lambda ()
+     (hash-ref
+      command
+      (symbol->string key)
+      (lambda ()
+        (hash-ref command alias (lambda () (hash-ref command (symbol->string alias) failure))))))))
+
+(define (command-modifiers command)
+  (filter values
+          (list (and (command-ref command 'shift? (lambda () #f)) 'shift)
+                (and (command-ref command 'ctrl? (lambda () #f)) 'ctrl)
+                (and (command-ref command 'alt? (lambda () #f)) 'alt)
+                (and (command-ref command 'meta? (lambda () #f)) 'super)
+                (and (command-ref command 'caps-lock? (lambda () #f)) 'caps-lock)
+                (and (command-ref command 'num-lock? (lambda () #f)) 'num-lock))))
+
+(define (write-pty-input! session bytes)
+  (unless (zero? (bytes-length bytes))
+    (write-bytes bytes (browser-session-master-output session))
+    (flush-output (browser-session-master-output session))))
+
+(define (key-text command)
+  (define text (command-ref command 'text (lambda () #f)))
+  (and (string? text)
+       (not (member text
+                    '("Alt" "ArrowDown"
+                            "ArrowLeft"
+                            "ArrowRight"
+                            "ArrowUp"
+                            "Backspace"
+                            "Control"
+                            "Delete"
+                            "End"
+                            "Enter"
+                            "Escape"
+                            "Home"
+                            "Insert"
+                            "Meta"
+                            "PageDown"
+                            "PageUp"
+                            "Shift"
+                            "Tab")))
+       text))
+
+(define (handle-key! session command)
+  (define code (command-ref command 'code))
+  (define action (string->symbol (command-ref command 'action)))
+  (define modifiers (command-modifiers command))
+  (define side
+    (cond
+      [(and (member code '("ShiftRight" "ControlRight" "AltRight" "MetaRight"))
+            (member (case code
+                      [("ShiftRight") 'shift]
+                      [("ControlRight") 'ctrl]
+                      [("AltRight") 'alt]
+                      [else 'super])
+                    modifiers))
+       (case code
+         [("ShiftRight") 'right-shift]
+         [("ControlRight") 'right-ctrl]
+         [("AltRight") 'right-alt]
+         [else 'right-super])]
+      [else #f]))
+  (define event
+    (key-event action
+               (browser-code->key code)
+               #:modifiers (if side
+                               (append modifiers (list side))
+                               modifiers)
+               #:text (key-text command)
+               #:composing? (command-ref command 'composing? (lambda () #f))))
+  (write-pty-input! session
+                    (key-encoder-encode (browser-session-key-encoder session)
+                                        event
+                                        #:terminal (browser-session-terminal session)))
+  'key)
+
+(define (handle-paste! session command)
+  (define bracketed?
+    (terminal-mode-enabled? (browser-session-terminal session)
+                            (hash-ref terminal-modes 'bracketed-paste)))
+  (write-pty-input! session
+                    (paste-encode (string->bytes/utf-8 (command-ref command 'text))
+                                  #:bracketed? bracketed?))
+  'paste)
+
+(define (pixel-integer value)
+  (if (exact-integer? value)
+      value
+      (inexact->exact (round value))))
+
+(define (handle-resize! session command)
+  (define columns (command-ref command 'columns))
+  (define rows (command-ref command 'rows))
+  (define cell-width (pixel-integer (command-ref command 'cell-width)))
+  (define cell-height (pixel-integer (command-ref command 'cell-height)))
+  (define geometry
+    (mouse-encoder-size (pixel-integer (command-ref command 'screen-width))
+                        (pixel-integer (command-ref command 'screen-height))
+                        cell-width
+                        cell-height
+                        (pixel-integer (command-ref command 'padding-top (lambda () 0)))
+                        (pixel-integer (command-ref command 'padding-bottom (lambda () 0)))
+                        (pixel-integer (command-ref command 'padding-right (lambda () 0)))
+                        (pixel-integer (command-ref command 'padding-left (lambda () 0)))))
+  (resize-pty! (browser-session-master session) columns rows)
+  (terminal-resize! (browser-session-terminal session)
+                    columns
+                    rows
+                    #:cell-width-px cell-width
+                    #:cell-height-px cell-height)
+  (mouse-encoder-set-size! (browser-session-mouse-encoder session) geometry)
+  (set-box! (browser-session-geometry session) geometry)
+  (when (terminal-mode-enabled? (browser-session-terminal session)
+                                (hash-ref terminal-modes 'in-band-resize))
+    (write-pty-input! session (size-report-encode 'mode-2048 rows columns cell-width cell-height)))
+  (signal-change! session 'changed)
+  'resize)
+
+(define (button-symbol value)
+  (hash-ref (hash 0 'left 1 'middle 2 'right 3 'four 4 'five)
+            value
+            (lambda () (error 'browser-session-handle-command! "unknown browser button ~a" value))))
+
+(define (handle-pointer! session command)
+  (define action (string->symbol (command-ref command 'action)))
+  (define button-value (command-ref command 'button (lambda () #f)))
+  (define button (and button-value (button-symbol button-value)))
+  (define pressed (browser-session-pressed-buttons session))
+  (case action
+    [(press) (set-box! pressed (cons button (remove button (unbox pressed))))]
+    [(release) (set-box! pressed (remove button (unbox pressed)))]
+    [else (void)])
+  (mouse-encoder-set-any-button-pressed! (browser-session-mouse-encoder session)
+                                         (pair? (unbox pressed)))
+  (define event-button
+    (or button (and (eq? action 'motion) (pair? (unbox pressed)) (car (unbox pressed)))))
+  (write-pty-input! session
+                    (mouse-encoder-encode (browser-session-mouse-encoder session)
+                                          (mouse-event action
+                                                       event-button
+                                                       (command-ref command 'x)
+                                                       (command-ref command 'y)
+                                                       #:modifiers (command-modifiers command))
+                                          #:terminal (browser-session-terminal session)))
+  'pointer)
+
+(define (mouse-tracking? terminal)
+  (for/or ([name '(x10-mouse normal-mouse button-mouse any-mouse)])
+    (terminal-mode-enabled? terminal (hash-ref terminal-modes name))))
+
+(define (handle-wheel! session command)
+  (define terminal (browser-session-terminal session))
+  (define delta-x (command-ref command 'delta-x))
+  (define delta-y (command-ref command 'delta-y))
+  (cond
+    [(mouse-tracking? terminal)
+     (define button
+       (cond
+         [(negative? delta-y) 'four]
+         [(positive? delta-y) 'five]
+         [(negative? delta-x) 'six]
+         [else 'seven]))
+     (write-pty-input! session
+                       (mouse-encoder-encode (browser-session-mouse-encoder session)
+                                             (mouse-event 'press
+                                                          button
+                                                          (command-ref command 'x)
+                                                          (command-ref command 'y)
+                                                          #:modifiers (command-modifiers command))
+                                             #:terminal terminal))
+     'mouse-report]
+    [(and (terminal-mode-enabled? terminal (hash-ref terminal-modes 'alt-scroll))
+          (or (terminal-mode-enabled? terminal (hash-ref terminal-modes 'alt-screen))
+              (terminal-mode-enabled? terminal (hash-ref terminal-modes 'alt-screen-save))))
+     (define key (if (negative? delta-y) 'arrow-up 'arrow-down))
+     (write-pty-input! session
+                       (key-encoder-encode (browser-session-key-encoder session)
+                                           (key-event 'press key)
+                                           #:terminal terminal))
+     'alternate-scroll]
+    [else 'viewport-scroll]))
+
+(define (browser-session-handle-command! session command)
+  (call-with-semaphore
+   (browser-session-state-lock session)
+   (lambda ()
+     (when (unbox (browser-session-closed? session))
+       (error 'browser-session-handle-command! "session is closed"))
+     (define sequence (command-ref command 'sequence))
+     (unless (= sequence (add1 (unbox (browser-session-last-sequence session))))
+       (error 'browser-session-handle-command! "out-of-order sequence ~a" sequence))
+     (define result
+       (case (string->symbol (command-ref command 'type))
+         [(key) (handle-key! session command)]
+         [(paste) (handle-paste! session command)]
+         [(resize) (handle-resize! session command)]
+         [(pointer) (handle-pointer! session command)]
+         [(wheel) (handle-wheel! session command)]
+         [else (error 'browser-session-handle-command! "unknown command type")]))
+     (set-box! (browser-session-last-sequence session) sequence)
+     result)))
 
 (define (build-info-xexpr)
   (define info (libghostty-build-info))
@@ -249,8 +610,9 @@
                (meta ((name "viewport") (content "width=device-width, initial-scale=1")))
                (title "libghostty browser terminal")
                (style ,terminal-stylesheet)
-               (script ((type "module") (src ,datastar-cdn-url))))
-         (body (main (,(data-init (get "/events")))
+               (script ((type "module") (src ,datastar-cdn-url)))
+               (script ((type "module") (src "/input-adapter.js"))))
+         (body (main ((id "terminal-session") ,(data-init (get "/events")))
                      (h1 "libghostty browser terminal")
                      ,(build-info-xexpr)
                      ,(terminal-xexpr session)))))
@@ -268,10 +630,27 @@
                            (patch-elements/xexprs sse (terminal-xexpr session))
                            (loop)]
                           ['done (patch-elements/xexprs sse (terminal-xexpr session))]))))))
+  (define (command-handler request)
+    (define data (request-post-data/raw request))
+    (unless data
+      (error 'command-handler "missing command body"))
+    (browser-session-handle-command! session (bytes->jsexpr data))
+    (response/full 204 #"No Content" (current-seconds) #f '() '()))
+  (define (adapter-handler _request)
+    (response/full 200
+                   #"OK"
+                   (current-seconds)
+                   #"text/javascript; charset=utf-8"
+                   '()
+                   (list (file->bytes input-adapter.js))))
   (define (not-found-handler _request)
     (response/xexpr '(html (body "Not found")) #:code 404))
   (define-values (app _reverse-uri)
-    (dispatch-rules [("") home-handler] [("events") events-handler] [else not-found-handler]))
+    (dispatch-rules [("") home-handler]
+                    [("events") events-handler]
+                    [("commands") #:method "post" command-handler]
+                    [("input-adapter.js") adapter-handler]
+                    [else not-found-handler]))
   (values app session))
 
 (define (serve-browser-terminal #:port [port 8080] #:listen-ip [listen-ip "127.0.0.1"])

@@ -5,6 +5,7 @@
          ffi/unsafe/port)
 
 (provide spawn-pty-command
+         resize-pty!
          wait-pty-process!
          terminate-pty-process!)
 
@@ -34,6 +35,9 @@
 (define-libc close-fd (_fun _int -> _int) #:c-id close)
 
 (define-libc signal-process (_fun _int _int -> _int) #:c-id kill)
+(define-libc resize-file-descriptor (_fun _int _ulong _winsize-pointer -> _int) #:c-id ioctl)
+
+(define TIOCSWINSZ #x5414)
 
 (define (checked-dup descriptor)
   (define copy (dup-fd descriptor))
@@ -55,12 +59,15 @@
     (error 'spawn-pty-command "openpty failed with code ~a" result))
   (define slave-input-fd #f)
   (define slave-output-fd #f)
+  (define master-output-fd #f)
   (define master-input #f)
+  (define master-output #f)
   (define slave-input #f)
   (define slave-output #f)
   (define slave-error #f)
   (with-handlers ([exn? (lambda (error)
                           (close-port master-input)
+                          (close-port master-output)
                           (close-port slave-input)
                           (close-port slave-output)
                           (close-port slave-error)
@@ -68,6 +75,8 @@
                             (close-fd slave-input-fd))
                           (when slave-output-fd
                             (close-fd slave-output-fd))
+                          (when master-output-fd
+                            (close-fd master-output-fd))
                           (unless master-input
                             (close-fd master))
                           (unless slave-error
@@ -75,7 +84,10 @@
                           (raise error))])
     (set! slave-input-fd (checked-dup slave))
     (set! slave-output-fd (checked-dup slave))
-    (set! master-input (unsafe-file-descriptor->port master 'pty-master '(read)))
+    (set! master-output-fd (checked-dup master))
+    (set! master-input (unsafe-file-descriptor->port master 'pty-master-input '(read)))
+    (set! master-output (unsafe-file-descriptor->port master-output-fd 'pty-master-output '(write)))
+    (set! master-output-fd #f)
     (set! slave-input (unsafe-file-descriptor->port slave-input-fd 'pty-slave-input '(read)))
     (set! slave-input-fd #f)
     (set! slave-output (unsafe-file-descriptor->port slave-output-fd 'pty-slave-output '(write)))
@@ -86,7 +98,16 @@
     (close-port slave-input)
     (close-port slave-output)
     (close-port slave-error)
-    (values process master-input)))
+    (values process master-input master-output)))
+
+(define (resize-pty! port columns rows [x-pixels 0] [y-pixels 0])
+  (define descriptor (unsafe-port->file-descriptor port))
+  (unless (and descriptor
+               (zero? (resize-file-descriptor descriptor
+                                              TIOCSWINSZ
+                                              (make-winsize rows columns x-pixels y-pixels))))
+    (error 'resize-pty! "could not resize PTY"))
+  (void))
 
 (define (wait-pty-process! process)
   (subprocess-wait process)

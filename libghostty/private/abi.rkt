@@ -7,9 +7,13 @@
          "ffi/common.rkt"
          "ffi/device.rkt"
          "ffi/formatter.rkt"
+         "ffi/mouse-encoder.rkt"
+         "ffi/mouse-event.rkt"
          "ffi/render.rkt"
          "ffi/sgr.rkt"
-         "ffi/style.rkt")
+         "ffi/size-report.rkt"
+         "ffi/style.rkt"
+         "ffi/terminal.rkt")
 
 (provide libghostty-type-layouts
          check-libghostty-abi!)
@@ -79,6 +83,27 @@
                (cons 'trim _stdbool)
                (cons 'extra _GhosttyFormatterTerminalExtra)
                (cons 'selection _pointer)))
+   (list 'GhosttyMousePosition _GhosttyMousePosition (list (cons 'x _float) (cons 'y _float)))
+   (list 'GhosttyMouseEncoderSize
+         _GhosttyMouseEncoderSize
+         (list (cons 'size _size)
+               (cons 'screen_width _uint32)
+               (cons 'screen_height _uint32)
+               (cons 'cell_width _uint32)
+               (cons 'cell_height _uint32)
+               (cons 'padding_top _uint32)
+               (cons 'padding_bottom _uint32)
+               (cons 'padding_right _uint32)
+               (cons 'padding_left _uint32)))
+   (list 'GhosttySizeReportSize
+         _GhosttySizeReportSize
+         (list (cons 'rows _uint16)
+               (cons 'columns _uint16)
+               (cons 'cell_width _uint32)
+               (cons 'cell_height _uint32)))
+   (list 'GhosttyTerminalModeConfig
+         _GhosttyTerminalModeConfig
+         (list (cons 'mode _uint16) (cons 'value _stdbool)))
    (list 'GhosttyRenderStateColors
          _GhosttyRenderStateColors
          (list (cons 'size _size)
@@ -153,6 +178,25 @@
                         (format "field ~a offset" field-name)
                         (hash-ref offsets field-name)
                         (layout-ref native-field 'offset))))
+
+(define (check-input-scalar-layouts)
+  (for ([entry (in-list (list (cons 'GhosttyKeyAction ghostty-racket-key-action-size)
+                              (cons 'GhosttyKey ghostty-racket-key-size)
+                              (cons 'GhosttyOptionAsAlt ghostty-racket-option-as-alt-size)
+                              (cons 'GhosttyKeyEncoderOption ghostty-racket-key-encoder-option-size)
+                              (cons 'GhosttyMouseAction ghostty-racket-mouse-action-size)
+                              (cons 'GhosttyMouseButton ghostty-racket-mouse-button-size)
+                              (cons 'GhosttyMouseTrackingMode ghostty-racket-mouse-tracking-mode-size)
+                              (cons 'GhosttyMouseFormat ghostty-racket-mouse-format-size)
+                              (cons 'GhosttyMouseEncoderOption
+                                    ghostty-racket-mouse-encoder-option-size)
+                              (cons 'GhosttySizeReportStyle ghostty-racket-size-report-style-size)))])
+    (check-equal-layout (car entry) 'size (ctype-sizeof _int) ((cdr entry))))
+  (check-equal-layout 'GhosttyMods 'size (ctype-sizeof _uint16) (ghostty-racket-mods-size))
+  (check-equal-layout 'GhosttyKittyKeyFlags
+                      'size
+                      (ctype-sizeof _uint8)
+                      (ghostty-racket-kitty-key-flags-size)))
 
 (define (check-probed-render-layouts)
   (check-equal-layout 'GhosttyRenderStateRowSelection
@@ -263,6 +307,7 @@
 (define (check-libghostty-abi!)
   (unless abi-checked?
     (for-each check-declaration declarations)
+    (check-input-scalar-layouts)
     (check-probed-render-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)

@@ -6,13 +6,17 @@
 
 (provide _GhosttyTerminal
          GhosttyTerminal?
+         (struct-out GhosttyTerminalModeConfig)
+         _GhosttyTerminalModeConfig
          ghostty-terminal-new
          ghostty-terminal-free
          ghostty-terminal-reset
          ghostty-terminal-resize
-         ghostty-terminal-vt-write)
+         ghostty-terminal-vt-write
+         ghostty-terminal-get)
 
 (define-cpointer-type _GhosttyTerminal)
+(define-cstruct _GhosttyTerminalModeConfig ([mode _uint16] [value _stdbool]))
 
 (define-ghostty ghostty-terminal-new/raw
                 (_fun _pointer _pointer _uint16 _uint16 -> _int)
@@ -38,3 +42,7 @@
 (define-ghostty ghostty-terminal-vt-write
                 (_fun _GhosttyTerminal _bytes _size -> _void)
                 #:c-id ghostty_terminal_vt_write)
+
+(define-ghostty ghostty-terminal-get
+                (_fun _GhosttyTerminal _int _pointer -> _int)
+                #:c-id ghostty_terminal_get)

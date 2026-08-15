@@ -6,7 +6,19 @@
          ffi/unsafe/define
          racket/runtime-path)
 
-(provide ghostty-racket-render-state-row-selection-size
+(provide ghostty-racket-key-action-size
+         ghostty-racket-key-size
+         ghostty-racket-mods-size
+         ghostty-racket-kitty-key-flags-size
+         ghostty-racket-option-as-alt-size
+         ghostty-racket-key-encoder-option-size
+         ghostty-racket-mouse-action-size
+         ghostty-racket-mouse-button-size
+         ghostty-racket-mouse-tracking-mode-size
+         ghostty-racket-mouse-format-size
+         ghostty-racket-mouse-encoder-option-size
+         ghostty-racket-size-report-style-size
+         ghostty-racket-render-state-row-selection-size
          ghostty-racket-render-state-row-selection-align
          ghostty-racket-render-state-row-selection-start-x-offset
          ghostty-racket-render-state-row-selection-end-x-offset
@@ -32,6 +44,22 @@
 
 (define-runtime-path libghostty-vt-abi.so '(so "libghostty-vt-abi"))
 (define-ffi-definer define-ghostty-abi (ffi-lib libghostty-vt-abi.so))
+
+(define-syntax-rule (define-size name c-name)
+  (define-ghostty-abi name (_fun -> _size) #:c-id c-name))
+
+(define-size ghostty-racket-key-action-size ghostty_racket_key_action_size)
+(define-size ghostty-racket-key-size ghostty_racket_key_size)
+(define-size ghostty-racket-mods-size ghostty_racket_mods_size)
+(define-size ghostty-racket-kitty-key-flags-size ghostty_racket_kitty_key_flags_size)
+(define-size ghostty-racket-option-as-alt-size ghostty_racket_option_as_alt_size)
+(define-size ghostty-racket-key-encoder-option-size ghostty_racket_key_encoder_option_size)
+(define-size ghostty-racket-mouse-action-size ghostty_racket_mouse_action_size)
+(define-size ghostty-racket-mouse-button-size ghostty_racket_mouse_button_size)
+(define-size ghostty-racket-mouse-tracking-mode-size ghostty_racket_mouse_tracking_mode_size)
+(define-size ghostty-racket-mouse-format-size ghostty_racket_mouse_format_size)
+(define-size ghostty-racket-mouse-encoder-option-size ghostty_racket_mouse_encoder_option_size)
+(define-size ghostty-racket-size-report-style-size ghostty_racket_size_report_style_size)
 
 (define-ghostty-abi ghostty-racket-render-state-row-selection-size
                     (_fun -> _size)

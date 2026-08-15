@@ -17,7 +17,8 @@
          terminal-resize!
          terminal-write!
          terminal->plain-text
-         terminal-render-snapshot)
+         terminal-render-snapshot
+         call-with-terminal-pointer)
 
 (struct terminal (pointer lock render-state row-iterator row-cells) #:authentic)
 

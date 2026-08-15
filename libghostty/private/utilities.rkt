@@ -7,17 +7,22 @@
          "ffi/focus.rkt"
          "ffi/modes.rkt"
          "ffi/paste.rkt"
-         "ffi/unicode.rkt")
+         "ffi/size-report.rkt"
+         "ffi/terminal.rkt"
+         "ffi/unicode.rkt"
+         "terminal.rkt")
 
 (provide color-scheme-report-encode
          focus-encode
          paste-safe?
          paste-encode
+         size-report-encode
          unicode-codepoint-width
          unicode-grapheme-width
          (struct-out terminal-mode)
          terminal-modes
          mode-report-encode
+         terminal-mode-enabled?
          (struct-out primary-device-attributes)
          (struct-out secondary-device-attributes)
          (struct-out tertiary-device-attributes)
@@ -65,6 +70,15 @@
    (lambda (buffer length)
      (define fresh-input (bytes-copy data))
      (ghostty-paste-encode fresh-input (bytes-length fresh-input) bracketed? buffer length))))
+
+(define size-report-styles (hash 'mode-2048 0 'csi-14-t 1 'csi-16-t 2 'csi-18-t 3))
+
+(define (size-report-encode style rows columns cell-width cell-height)
+  (define size (make-GhosttySizeReportSize rows columns cell-width cell-height))
+  (encode-negotiated
+   'size-report-encode
+   (lambda (buffer length)
+     (ghostty-size-report-encode (hash-ref size-report-styles style) size buffer length))))
 
 (define (unicode-codepoint-width codepoint)
   (ghostty-unicode-codepoint-width codepoint))
@@ -139,6 +153,15 @@
                                                    (hash-ref mode-report-states state)
                                                    buffer
                                                    length))))
+
+(define (terminal-mode-enabled? terminal mode)
+  (call-with-terminal-pointer
+   'terminal-mode-enabled?
+   terminal
+   (lambda (pointer)
+     (define config (make-GhosttyTerminalModeConfig (mode->packed mode) #f))
+     (check-ghostty-result 'terminal-mode-enabled? (ghostty-terminal-get pointer 37 config))
+     (GhosttyTerminalModeConfig-value config))))
 
 (struct primary-device-attributes (conformance-level features) #:transparent)
 (struct secondary-device-attributes (device-type firmware-version rom-cartridge) #:transparent)

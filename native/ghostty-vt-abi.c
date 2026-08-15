@@ -1,8 +1,24 @@
+#include <ghostty/vt/key.h>
+#include <ghostty/vt/mouse.h>
 #include <ghostty/vt/render.h>
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/sgr.h>
+#include <ghostty/vt/size_report.h>
 #include <ghostty/vt/style.h>
 #include <stddef.h>
+
+size_t ghostty_racket_key_action_size(void) { return sizeof(GhosttyKeyAction); }
+size_t ghostty_racket_key_size(void) { return sizeof(GhosttyKey); }
+size_t ghostty_racket_mods_size(void) { return sizeof(GhosttyMods); }
+size_t ghostty_racket_kitty_key_flags_size(void) { return sizeof(GhosttyKittyKeyFlags); }
+size_t ghostty_racket_option_as_alt_size(void) { return sizeof(GhosttyOptionAsAlt); }
+size_t ghostty_racket_key_encoder_option_size(void) { return sizeof(GhosttyKeyEncoderOption); }
+size_t ghostty_racket_mouse_action_size(void) { return sizeof(GhosttyMouseAction); }
+size_t ghostty_racket_mouse_button_size(void) { return sizeof(GhosttyMouseButton); }
+size_t ghostty_racket_mouse_tracking_mode_size(void) { return sizeof(GhosttyMouseTrackingMode); }
+size_t ghostty_racket_mouse_format_size(void) { return sizeof(GhosttyMouseFormat); }
+size_t ghostty_racket_mouse_encoder_option_size(void) { return sizeof(GhosttyMouseEncoderOption); }
+size_t ghostty_racket_size_report_style_size(void) { return sizeof(GhosttySizeReportStyle); }
 
 size_t ghostty_racket_render_state_row_selection_size(void) {
   return sizeof(GhosttyRenderStateRowSelection);

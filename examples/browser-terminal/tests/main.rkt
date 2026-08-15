@@ -3,6 +3,8 @@
 (require browser-terminal/app
          libghostty
          net/url
+         racket/file
+         racket/path
          racket/port
          racket/string
          racket/tcp
@@ -128,6 +130,62 @@
   (check-true (string-contains? empty-cursor-html
                                 "class=\"terminal-cell placeholder selected cursor narrow\"")))
 
+(test-case "browser adapter sends facts only"
+  (define source
+    (file->string (build-path (path-only (collection-file-path "app.rkt" "browser-terminal"))
+                              "input-adapter.js")))
+  (for ([fact '("key" "resize" "paste" "pointer" "wheel" "sequence" "deltaX" "cellWidth")])
+    (check-true (string-contains? source fact)))
+  (for ([policy '("\\u001b" "\\x1b" "2004" "1006" "bracketed" "alternate-scroll" "clamp")])
+    (check-false (string-contains? source policy))))
+
+(test-case "server command handler preserves order and routes native input"
+  (define-values (_app session) (make-browser-terminal-app))
+  (dynamic-wind
+   void
+   (lambda ()
+     (sleep 0.2)
+     (check-equal? (browser-session-handle-command!
+                    session
+                    (hash 'sequence 1 'type "key" 'action "press" 'code "KeyA" 'text "a"))
+                   'key)
+     (check-equal?
+      (browser-session-handle-command! session (hash 'sequence 2 'type "paste" 'text "pasted\ntext"))
+      'paste)
+     (check-equal? (browser-session-handle-command! session
+                                                    (hash 'sequence
+                                                          3
+                                                          'type
+                                                          "resize"
+                                                          'columns
+                                                          79
+                                                          'rows
+                                                          23
+                                                          'screen-width
+                                                          790
+                                                          'screen-height
+                                                          460
+                                                          'cell-width
+                                                          10
+                                                          'cell-height
+                                                          20))
+                   'resize)
+     (check-equal? (browser-session-handle-command!
+                    session
+                    (hash 'sequence 4 'type "pointer" 'action "press" 'button 0 'x 0.0 'y 0.0))
+                   'pointer)
+     (check-equal?
+      (browser-session-handle-command!
+       session
+       (hash 'sequence 5 'type "wheel" 'delta-x 0.0 'delta-y -20.0 'delta-mode 0 'x 0.0 'y 0.0))
+      'mouse-report)
+     (check-exn exn:fail?
+                (lambda ()
+                  (browser-session-handle-command!
+                   session
+                   (hash 'sequence 5 'type "key" 'action "release" 'code "KeyA" 'text "a")))))
+   (lambda () (browser-session-close! session))))
+
 (test-case "SSE receives a live PTY update after its initial snapshot"
   (define custodian (make-custodian))
   (define port (unused-port))
@@ -176,13 +234,15 @@
      (custodian-shutdown-all custodian))))
 
 (test-case "process signaling falls back from a missing group to the leader"
-  (define-values (process master) (spawn-pty-command 80 24 "/bin/sleep" (list "30")))
+  (define-values (process master master-output) (spawn-pty-command 80 24 "/bin/sleep" (list "30")))
   (define started (current-inexact-milliseconds))
   (dynamic-wind void
                 (lambda () (check-true (exact-integer? (terminate-pty-process! process))))
                 (lambda ()
                   (with-handlers ([exn:fail? void])
-                    (close-input-port master))))
+                    (close-input-port master))
+                  (with-handlers ([exn:fail? void])
+                    (close-output-port master-output))))
   (check-true (< (- (current-inexact-milliseconds) started) 2000.0)))
 
 (test-case "closing a live PTY session is bounded and wakes waiters"
