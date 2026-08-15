@@ -86,13 +86,12 @@
        (browser-session-wait session 10)
        (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK 界 é 👩‍💻")
        (define snapshot (browser-session-snapshot session))
-       (check-true
-        (for/or ([row (in-vector (render-snapshot-row-data snapshot))])
-          (for/or ([cell (in-vector (render-row-cells row))])
-            (and (equal? (render-cell-grapheme cell) "界") (= (render-cell-width cell) 2)))))
+       (check-true (for/or ([row (in-vector (render-snapshot-row-data snapshot))])
+                     (for/or ([cell (in-vector (render-row-cells row))])
+                       (and (equal? (render-cell-grapheme cell) "界")
+                            (= (render-cell-width cell) 2)))))
        (define events (receive-with-timeout 'sse-read sse-result 5))
-       (check-true
-        (>= (length (regexp-match* #rx"event: datastar-patch-elements" events)) 2))
+       (check-true (>= (length (regexp-match* #rx"event: datastar-patch-elements" events)) 2))
        (check-true (string-contains? events ">P</span>"))
        (check-true (string-contains? events "terminal-cell"))
        (check-true (string-contains? events "data-width=\"2\""))

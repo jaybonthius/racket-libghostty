@@ -25,18 +25,50 @@
 (struct render-cursor (style visible? blinking? password-input? viewport) #:transparent)
 (struct render-viewport (x y wide-tail?) #:transparent)
 (struct render-row
-  (y dirty? wrap? wrap-continuation? grapheme? styled? hyperlink? semantic-prompt
-     kitty-virtual-placeholder? selection cells)
+        (y dirty?
+           wrap?
+           wrap-continuation?
+           grapheme?
+           styled?
+           hyperlink?
+           semantic-prompt
+           kitty-virtual-placeholder?
+           selection
+           cells)
   #:transparent)
 (struct render-selection-range (start-x end-x) #:transparent)
 (struct render-cell
-  (x y codepoint grapheme grapheme-count width wide content has-text? has-styling? style-id
-     hyperlink? protected? semantic-content content-color style resolved-background
-     resolved-foreground selected?)
+        (x y
+           codepoint
+           grapheme
+           grapheme-count
+           width
+           wide
+           content
+           has-text?
+           has-styling?
+           style-id
+           hyperlink?
+           protected?
+           semantic-content
+           content-color
+           style
+           resolved-background
+           resolved-foreground
+           selected?)
   #:transparent)
 (struct render-style
-  (foreground background underline-color bold? italic? faint? blink? inverse? invisible?
-              strikethrough? overline? underline)
+        (foreground background
+                    underline-color
+                    bold?
+                    italic?
+                    faint?
+                    blink?
+                    inverse?
+                    invisible?
+                    strikethrough?
+                    overline?
+                    underline)
   #:transparent)
 (struct render-style-color (source value) #:transparent)
 
@@ -77,47 +109,40 @@
 (define (copy-colors state)
   (define output (malloc _GhosttyRenderStateColors 'atomic))
   (ptr-set! output _size 0 (ctype-sizeof _GhosttyRenderStateColors))
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-colors-get state output))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-colors-get state output))
   (define value (ptr-ref output _GhosttyRenderStateColors))
   (define palette (GhosttyRenderStateColors-palette value))
-  (render-colors
-   (native->rgb (GhosttyRenderStateColors-background value))
-   (native->rgb (GhosttyRenderStateColors-foreground value))
-   (and (GhosttyRenderStateColors-cursor-has-value value)
-        (native->rgb (GhosttyRenderStateColors-cursor value)))
-   (vector->immutable-vector
-    (for/vector #:length 256
-                ([index (in-range 256)])
-      (native->rgb (array-ref palette index))))))
+  (render-colors (native->rgb (GhosttyRenderStateColors-background value))
+                 (native->rgb (GhosttyRenderStateColors-foreground value))
+                 (and (GhosttyRenderStateColors-cursor-has-value value)
+                      (native->rgb (GhosttyRenderStateColors-cursor value)))
+                 (vector->immutable-vector (for/vector #:length 256
+                                                       ([index (in-range 256)])
+                                             (native->rgb (array-ref palette index))))))
 
 (define (copy-cursor state)
-  (define viewport?
-    (render-state-query 'terminal-render-snapshot state 14 _stdbool))
-  (render-cursor
-   (enum-ref 'terminal-render-snapshot
-             cursor-style-values
-             (render-state-query 'terminal-render-snapshot state 10 _int))
-   (render-state-query 'terminal-render-snapshot state 11 _stdbool)
-   (render-state-query 'terminal-render-snapshot state 12 _stdbool)
-   (render-state-query 'terminal-render-snapshot state 13 _stdbool)
-   (and viewport?
-        (render-viewport
-         (render-state-query 'terminal-render-snapshot state 15 _uint16)
-         (render-state-query 'terminal-render-snapshot state 16 _uint16)
-         (render-state-query 'terminal-render-snapshot state 17 _stdbool)))))
+  (define viewport? (render-state-query 'terminal-render-snapshot state 14 _stdbool))
+  (render-cursor (enum-ref 'terminal-render-snapshot
+                           cursor-style-values
+                           (render-state-query 'terminal-render-snapshot state 10 _int))
+                 (render-state-query 'terminal-render-snapshot state 11 _stdbool)
+                 (render-state-query 'terminal-render-snapshot state 12 _stdbool)
+                 (render-state-query 'terminal-render-snapshot state 13 _stdbool)
+                 (and viewport?
+                      (render-viewport
+                       (render-state-query 'terminal-render-snapshot state 15 _uint16)
+                       (render-state-query 'terminal-render-snapshot state 16 _uint16)
+                       (render-state-query 'terminal-render-snapshot state 17 _stdbool)))))
 
 (define (populate-row-iterator! state iterator)
   (define output (malloc _pointer))
   (ptr-set! output _pointer iterator)
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-get state 4 output)))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-get state 4 output)))
 
 (define (populate-cells! iterator cells)
   (define output (malloc _pointer))
   (ptr-set! output _pointer cells)
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-row-get iterator 3 output)))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-row-get iterator 3 output)))
 
 (define (copy-row-selection iterator)
   (define output (malloc _GhosttyRenderStateRowSelection 'atomic))
@@ -142,22 +167,20 @@
 (define (copy-style cells)
   (define output (malloc _GhosttyStyle 'atomic))
   (ptr-set! output _size 0 (ctype-sizeof _GhosttyStyle))
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-row-cells-get cells 2 output))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-row-cells-get cells 2 output))
   (define value (ptr-ref output _GhosttyStyle))
-  (render-style
-   (copy-style-color (GhosttyStyle-fg-color value))
-   (copy-style-color (GhosttyStyle-bg-color value))
-   (copy-style-color (GhosttyStyle-underline-color value))
-   (GhosttyStyle-bold value)
-   (GhosttyStyle-italic value)
-   (GhosttyStyle-faint value)
-   (GhosttyStyle-blink value)
-   (GhosttyStyle-inverse value)
-   (GhosttyStyle-invisible value)
-   (GhosttyStyle-strikethrough value)
-   (GhosttyStyle-overline value)
-   (enum-ref 'terminal-render-snapshot underline-values (GhosttyStyle-underline value))))
+  (render-style (copy-style-color (GhosttyStyle-fg-color value))
+                (copy-style-color (GhosttyStyle-bg-color value))
+                (copy-style-color (GhosttyStyle-underline-color value))
+                (GhosttyStyle-bold value)
+                (GhosttyStyle-italic value)
+                (GhosttyStyle-faint value)
+                (GhosttyStyle-blink value)
+                (GhosttyStyle-inverse value)
+                (GhosttyStyle-invisible value)
+                (GhosttyStyle-strikethrough value)
+                (GhosttyStyle-overline value)
+                (enum-ref 'terminal-render-snapshot underline-values (GhosttyStyle-underline value))))
 
 (define (copy-optional-resolved-color cells key)
   (define output (malloc _GhosttyColorRgb 'atomic))
@@ -198,15 +221,11 @@
 (define (copy-content-color cell content)
   (case content
     [(background-palette)
-     (render-style-color 'palette
-                         (raw-cell-query 'terminal-render-snapshot cell 10 _uint8))]
+     (render-style-color 'palette (raw-cell-query 'terminal-render-snapshot cell 10 _uint8))]
     [(background-rgb)
-     (render-style-color 'rgb
-                         (native->rgb
-                          (raw-cell-query 'terminal-render-snapshot
-                                          cell
-                                          11
-                                          _GhosttyColorRgb)))]
+     (render-style-color
+      'rgb
+      (native->rgb (raw-cell-query 'terminal-render-snapshot cell 11 _GhosttyColorRgb)))]
     [else #f]))
 
 (define (copy-cell cells x y)
@@ -219,28 +238,30 @@
     (enum-ref 'terminal-render-snapshot
               content-values
               (raw-cell-query 'terminal-render-snapshot raw 2 _int)))
-  (render-cell
-   x
-   y
-   (raw-cell-query 'terminal-render-snapshot raw 1 _uint32)
-   (copy-grapheme cells)
-   (cell-query 'terminal-render-snapshot cells 3 _uint32)
-   (case wide [(narrow) 1] [(wide) 2] [else 0])
-   wide
-   content
-   (raw-cell-query 'terminal-render-snapshot raw 4 _stdbool)
-   (raw-cell-query 'terminal-render-snapshot raw 5 _stdbool)
-   (raw-cell-query 'terminal-render-snapshot raw 6 _uint16)
-   (raw-cell-query 'terminal-render-snapshot raw 7 _stdbool)
-   (raw-cell-query 'terminal-render-snapshot raw 8 _stdbool)
-   (enum-ref 'terminal-render-snapshot
-             semantic-content-values
-             (raw-cell-query 'terminal-render-snapshot raw 9 _int))
-   (copy-content-color raw content)
-   (copy-style cells)
-   (copy-optional-resolved-color cells 5)
-   (copy-optional-resolved-color cells 6)
-   (cell-query 'terminal-render-snapshot cells 7 _stdbool)))
+  (render-cell x
+               y
+               (raw-cell-query 'terminal-render-snapshot raw 1 _uint32)
+               (copy-grapheme cells)
+               (cell-query 'terminal-render-snapshot cells 3 _uint32)
+               (case wide
+                 [(narrow) 1]
+                 [(wide) 2]
+                 [else 0])
+               wide
+               content
+               (raw-cell-query 'terminal-render-snapshot raw 4 _stdbool)
+               (raw-cell-query 'terminal-render-snapshot raw 5 _stdbool)
+               (raw-cell-query 'terminal-render-snapshot raw 6 _uint16)
+               (raw-cell-query 'terminal-render-snapshot raw 7 _stdbool)
+               (raw-cell-query 'terminal-render-snapshot raw 8 _stdbool)
+               (enum-ref 'terminal-render-snapshot
+                         semantic-content-values
+                         (raw-cell-query 'terminal-render-snapshot raw 9 _int))
+               (copy-content-color raw content)
+               (copy-style cells)
+               (copy-optional-resolved-color cells 5)
+               (copy-optional-resolved-color cells 6)
+               (cell-query 'terminal-render-snapshot cells 7 _stdbool)))
 
 (define (copy-row iterator cells columns y)
   (define raw (row-query 'terminal-render-snapshot iterator 2 _uint64))
@@ -254,38 +275,35 @@
        (copy-cell cells x y))))
   (when (ghostty-render-state-row-cells-next cells)
     (error 'terminal-render-snapshot "native cell iterator exceeded the viewport width"))
-  (render-row
-   y
-   (row-query 'terminal-render-snapshot iterator 1 _stdbool)
-   (raw-row-query 'terminal-render-snapshot raw 1 _stdbool)
-   (raw-row-query 'terminal-render-snapshot raw 2 _stdbool)
-   (raw-row-query 'terminal-render-snapshot raw 3 _stdbool)
-   (raw-row-query 'terminal-render-snapshot raw 4 _stdbool)
-   (raw-row-query 'terminal-render-snapshot raw 5 _stdbool)
-   (enum-ref 'terminal-render-snapshot
-             semantic-prompt-values
-             (raw-row-query 'terminal-render-snapshot raw 6 _int))
-   (raw-row-query 'terminal-render-snapshot raw 7 _stdbool)
-   (copy-row-selection iterator)
-   cell-data))
+  (render-row y
+              (row-query 'terminal-render-snapshot iterator 1 _stdbool)
+              (raw-row-query 'terminal-render-snapshot raw 1 _stdbool)
+              (raw-row-query 'terminal-render-snapshot raw 2 _stdbool)
+              (raw-row-query 'terminal-render-snapshot raw 3 _stdbool)
+              (raw-row-query 'terminal-render-snapshot raw 4 _stdbool)
+              (raw-row-query 'terminal-render-snapshot raw 5 _stdbool)
+              (enum-ref 'terminal-render-snapshot
+                        semantic-prompt-values
+                        (raw-row-query 'terminal-render-snapshot raw 6 _int))
+              (raw-row-query 'terminal-render-snapshot raw 7 _stdbool)
+              (copy-row-selection iterator)
+              cell-data))
 
 (define (acknowledge! state iterator rows)
   (populate-row-iterator! state iterator)
   (define clean-row (malloc _stdbool 'atomic))
   (ptr-set! clean-row _stdbool #f)
-  (for ([y (in-range rows)])
+  (for ([_row (in-range rows)])
     (unless (ghostty-render-state-row-iterator-next iterator)
       (error 'terminal-render-snapshot "native row iterator ended during acknowledgement"))
     (check-ghostty-result 'terminal-render-snapshot
                           (ghostty-render-state-row-set iterator 0 clean-row)))
   (define clean (malloc _int 'atomic))
   (ptr-set! clean _int 0)
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-set state 0 clean)))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-set state 0 clean)))
 
 (define (copy-terminal-render-snapshot terminal state iterator cells)
-  (check-ghostty-result 'terminal-render-snapshot
-                        (ghostty-render-state-update state terminal))
+  (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-update state terminal))
   (define columns (render-state-query 'terminal-render-snapshot state 1 _uint16))
   (define rows (render-state-query 'terminal-render-snapshot state 2 _uint16))
   (define dirty

@@ -17,19 +17,18 @@
 (define-cstruct _GhosttyStyleColor ([kind _int] [value _GhosttyStyleColorUnion]))
 (define _GhosttyStyleColorValue _GhosttyStyleColorUnion)
 (define-cstruct _GhosttyStyle
-                ([size _size]
-                 [fg-color _GhosttyStyleColor]
-                 [bg-color _GhosttyStyleColor]
-                 [underline-color _GhosttyStyleColor]
-                 [bold _stdbool]
-                 [italic _stdbool]
-                 [faint _stdbool]
-                 [blink _stdbool]
-                 [inverse _stdbool]
-                 [invisible _stdbool]
-                 [strikethrough _stdbool]
-                 [overline _stdbool]
-                 [underline _int]))
+                ([size _size] [fg-color _GhosttyStyleColor]
+                              [bg-color _GhosttyStyleColor]
+                              [underline-color _GhosttyStyleColor]
+                              [bold _stdbool]
+                              [italic _stdbool]
+                              [faint _stdbool]
+                              [blink _stdbool]
+                              [inverse _stdbool]
+                              [invisible _stdbool]
+                              [strikethrough _stdbool]
+                              [overline _stdbool]
+                              [underline _int]))
 
 (define-ghostty ghostty-style-default
                 (_fun _GhosttyStyle-pointer -> _void)

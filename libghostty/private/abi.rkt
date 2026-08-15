@@ -108,10 +108,7 @@
                (cons 'underline _int)))
    (list 'GhosttyGridRef
          _GhosttyGridRef
-         (list (cons 'size _size)
-               (cons 'node _pointer)
-               (cons 'x _uint16)
-               (cons 'y _uint16)))
+         (list (cons 'size _size) (cons 'node _pointer) (cons 'x _uint16) (cons 'y _uint16)))
    (list 'GhosttySelection
          _GhosttySelection
          (list (cons 'size _size)

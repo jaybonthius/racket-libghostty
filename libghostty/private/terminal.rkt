@@ -29,14 +29,13 @@
     (define pointer (unbox pointer-box))
     (when pointer
       (if (box-cas! pointer-box pointer #f)
-          (dynamic-wind
-           void
-           (lambda ()
-             (ghostty-render-state-row-cells-free (terminal-row-cells value))
-             (ghostty-render-state-row-iterator-free (terminal-row-iterator value))
-             (ghostty-render-state-free (terminal-render-state value))
-             (ghostty-terminal-free pointer))
-           (lambda () (void/reference-sink value)))
+          (dynamic-wind void
+                        (lambda ()
+                          (ghostty-render-state-row-cells-free (terminal-row-cells value))
+                          (ghostty-render-state-row-iterator-free (terminal-row-iterator value))
+                          (ghostty-render-state-free (terminal-render-state value))
+                          (ghostty-terminal-free pointer))
+                        (lambda () (void/reference-sink value)))
           (loop)))))
 
 (define (make-terminal columns rows)
@@ -67,8 +66,7 @@
     (define-values (cells-result new-row-cells) (ghostty-render-state-row-cells-new))
     (set! row-cells new-row-cells)
     (check-ghostty-result 'make-terminal cells-result)
-    (define value
-      (terminal (box pointer) (make-semaphore 1) render-state row-iterator row-cells))
+    (define value (terminal (box pointer) (make-semaphore 1) render-state row-iterator row-cells))
     (register-finalizer value release-terminal!)
     value))
 
@@ -169,14 +167,13 @@
                        (ghostty-formatter-free formatter)))))))
 
 (define (terminal-render-snapshot value)
-  (call-with-terminal-pointer
-   'terminal-render-snapshot
-   value
-   (lambda (pointer)
-     (copy-terminal-render-snapshot pointer
-                                    (terminal-render-state value)
-                                    (terminal-row-iterator value)
-                                    (terminal-row-cells value)))))
+  (call-with-terminal-pointer 'terminal-render-snapshot
+                              value
+                              (lambda (pointer)
+                                (copy-terminal-render-snapshot pointer
+                                                               (terminal-render-state value)
+                                                               (terminal-row-iterator value)
+                                                               (terminal-row-cells value)))))
 
 (define (terminal-test-select-all! value)
   (call-with-terminal-pointer
@@ -185,8 +182,6 @@
    (lambda (pointer)
      (define selection (malloc _GhosttySelection 'atomic))
      (ptr-set! selection _size 0 (ctype-sizeof _GhosttySelection))
-     (check-ghostty-result 'terminal-test-select-all!
-                           (ghostty-terminal-select-all pointer selection))
-     (check-ghostty-result 'terminal-test-select-all!
-                           (ghostty-terminal-set pointer 21 selection))))
+     (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-select-all pointer selection))
+     (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-set pointer 21 selection))))
   (void))

@@ -38,15 +38,13 @@
 (define-cpointer-type _GhosttyRenderStateRowIterator)
 (define-cpointer-type _GhosttyRenderStateRowCells)
 
-(define-cstruct _GhosttyRenderStateRowSelection
-                ([size _size] [start-x _uint16] [end-x _uint16]))
+(define-cstruct _GhosttyRenderStateRowSelection ([size _size] [start-x _uint16] [end-x _uint16]))
 (define-cstruct _GhosttyRenderStateColors
-                ([size _size]
-                 [background _GhosttyColorRgb]
-                 [foreground _GhosttyColorRgb]
-                 [cursor _GhosttyColorRgb]
-                 [cursor-has-value _stdbool]
-                 [palette (_array _GhosttyColorRgb 256)]))
+                ([size _size] [background _GhosttyColorRgb]
+                              [foreground _GhosttyColorRgb]
+                              [cursor _GhosttyColorRgb]
+                              [cursor-has-value _stdbool]
+                              [palette (_array _GhosttyColorRgb 256)]))
 
 (define (make-owned-handle raw tag)
   (define output (malloc _pointer))

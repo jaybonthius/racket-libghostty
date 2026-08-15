@@ -79,12 +79,13 @@
        terminal-columns
        terminal-rows
        "/usr/bin/setsid"
-       (list "-c"
-             "/bin/sh"
-             "-c"
-             (format
-              "if exec 3<>/dev/tty; then sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
-              workflow-marker)))))
+       (list
+        "-c"
+        "/bin/sh"
+        "-c"
+        (format
+         "if exec 3<>/dev/tty; then sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
+         workflow-marker)))))
   (define session
     (browser-session terminal
                      process
@@ -154,10 +155,8 @@
 
 (define (cell-style-css cell colors)
   (define style (render-cell-style cell))
-  (define foreground
-    (or (render-cell-resolved-foreground cell) (render-colors-foreground colors)))
-  (define background
-    (or (render-cell-resolved-background cell) (render-colors-background colors)))
+  (define foreground (or (render-cell-resolved-foreground cell) (render-colors-foreground colors)))
+  (define background (or (render-cell-resolved-background cell) (render-colors-background colors)))
   (define-values (shown-foreground shown-background)
     (if (render-style-inverse? style)
         (values background foreground)
@@ -167,17 +166,16 @@
             (list (and (not (eq? (render-style-underline style) 'none)) "underline")
                   (and (render-style-strikethrough? style) "line-through")
                   (and (render-style-overline? style) "overline"))))
-  (string-join
-   (filter values
-           (list (format "color:~a" (rgb-css shown-foreground))
-                 (format "background-color:~a" (rgb-css shown-background))
-                 (and (render-style-bold? style) "font-weight:bold")
-                 (and (render-style-italic? style) "font-style:italic")
-                 (and (render-style-faint? style) "opacity:0.65")
-                 (and (render-style-invisible? style) "visibility:hidden")
-                 (and (pair? decorations)
-                      (format "text-decoration-line:~a" (string-join decorations " ")))))
-   ";"))
+  (string-join (filter values
+                       (list (format "color:~a" (rgb-css shown-foreground))
+                             (format "background-color:~a" (rgb-css shown-background))
+                             (and (render-style-bold? style) "font-weight:bold")
+                             (and (render-style-italic? style) "font-style:italic")
+                             (and (render-style-faint? style) "opacity:0.65")
+                             (and (render-style-invisible? style) "visibility:hidden")
+                             (and (pair? decorations)
+                                  (format "text-decoration-line:~a" (string-join decorations " ")))))
+               ";"))
 
 (define (cell-xexpr cell colors cursor)
   (define viewport (render-cursor-viewport cursor))
@@ -187,25 +185,25 @@
          (= (render-cell-x cell) (render-viewport-x viewport))
          (= (render-cell-y cell) (render-viewport-y viewport))))
   (define classes
-    (string-join
-     (filter values
-             (list "terminal-cell"
-                   (and (render-cell-selected? cell) "selected")
-                   (and cursor-cell? "cursor")
-                   (symbol->string (render-cell-wide cell))))
-     " "))
-  `(span ((class ,classes)
-          (data-x ,(number->string (render-cell-x cell)))
-          (data-y ,(number->string (render-cell-y cell)))
-          (data-width ,(number->string (render-cell-width cell)))
-          (data-graphemes ,(number->string (render-cell-grapheme-count cell)))
-          (style ,(cell-style-css cell colors)))
-         ,(if (eq? (render-cell-wide cell) 'spacer-head) "" (render-cell-grapheme cell))))
+    (string-join (filter values
+                         (list "terminal-cell"
+                               (and (render-cell-selected? cell) "selected")
+                               (and cursor-cell? "cursor")
+                               (symbol->string (render-cell-wide cell))))
+                 " "))
+  `(span ((class ,classes) (data-x ,(number->string (render-cell-x cell)))
+                           (data-y ,(number->string (render-cell-y cell)))
+                           (data-width ,(number->string (render-cell-width cell)))
+                           (data-graphemes ,(number->string (render-cell-grapheme-count cell)))
+                           (style ,(cell-style-css cell colors)))
+         ,(if (eq? (render-cell-wide cell) 'spacer-head)
+              ""
+              (render-cell-grapheme cell))))
 
 (define (row-xexpr row colors cursor)
   `(div ((class "terminal-row") (data-row ,(number->string (render-row-y row))))
         ,@(for/list ([cell (in-vector (render-row-cells row))]
-                    #:unless (eq? (render-cell-wide cell) 'spacer-tail))
+                     #:unless (eq? (render-cell-wide cell) 'spacer-tail))
             (cell-xexpr cell colors cursor))))
 
 (define (terminal-xexpr session)
@@ -219,8 +217,12 @@
              (data-cursor-visible ,(if (render-cursor-visible? cursor) "true" "false"))
              (data-cursor-blinking ,(if (render-cursor-blinking? cursor) "true" "false"))
              (data-cursor-password ,(if (render-cursor-password-input? cursor) "true" "false"))
-             (data-cursor-x ,(if viewport (number->string (render-viewport-x viewport)) ""))
-             (data-cursor-y ,(if viewport (number->string (render-viewport-y viewport)) ""))
+             (data-cursor-x ,(if viewport
+                                 (number->string (render-viewport-x viewport))
+                                 ""))
+             (data-cursor-y ,(if viewport
+                                 (number->string (render-viewport-y viewport))
+                                 ""))
              (data-cursor-wide-tail
               ,(if (and viewport (render-viewport-wide-tail? viewport)) "true" "false")))
             (h2 "Immutable render snapshot PTY workflow")

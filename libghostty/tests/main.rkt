@@ -182,22 +182,18 @@
      (terminal-resize! terminal 10 4)
      (define resized (terminal-render-snapshot terminal))
      (check-equal? (render-snapshot-dirty resized) 'full)
-     (check-equal? (list (render-snapshot-columns resized) (render-snapshot-rows resized))
-                   '(10 4)))))
+     (check-equal? (list (render-snapshot-columns resized) (render-snapshot-rows resized)) '(10 4)))))
 
 (test-case "render snapshot copies colors, cursor, graphemes, semantics, and complete styles"
   (call-with-terminal
    40
    4
    (lambda (terminal)
+     (terminal-write! terminal #"\33]10;#112233\7\33]11;#223344\7\33]12;#334455\7\33]4;5;#445566\7")
      (terminal-write!
       terminal
-      #"\33]10;#112233\7\33]11;#223344\7\33]12;#334455\7\33]4;5;#445566\7")
-     (terminal-write!
-      terminal
-      (bytes-append
-       #"\33]133;A\7\33[1;2;3;5;7;8;9;53;31;48;2;1;2;3;58;5;4;4:3mX\33[0m"
-       (string->bytes/utf-8 "界é👩‍💻")))
+      (bytes-append #"\33]133;A\7\33[1;2;3;5;7;8;9;53;31;48;2;1;2;3;58;5;4;4:3mX\33[0m"
+                    (string->bytes/utf-8 "界é👩‍💻")))
      (define snapshot (terminal-render-snapshot terminal))
      (define colors (render-snapshot-colors snapshot))
      (check-equal? (render-colors-foreground colors) (color-rgb #x11 #x22 #x33))
@@ -209,18 +205,14 @@
      (check-equal? (render-row-semantic-prompt row) 'prompt)
      (define styled (snapshot-cell snapshot 0))
      (check-equal? (render-cell-semantic-content styled) 'prompt)
-     (check-equal? (render-style-color-source
-                    (render-style-foreground (render-cell-style styled)))
+     (check-equal? (render-style-color-source (render-style-foreground (render-cell-style styled)))
                    'palette)
-     (check-equal? (render-style-color-value
-                    (render-style-foreground (render-cell-style styled)))
-                   1)
-     (check-equal? (render-style-color-value
-                    (render-style-background (render-cell-style styled)))
+     (check-equal? (render-style-color-value (render-style-foreground (render-cell-style styled))) 1)
+     (check-equal? (render-style-color-value (render-style-background (render-cell-style styled)))
                    (color-rgb 1 2 3))
-     (check-equal? (render-style-color-value
-                    (render-style-underline-color (render-cell-style styled)))
-                   4)
+     (check-equal?
+      (render-style-color-value (render-style-underline-color (render-cell-style styled)))
+      4)
      (define style (render-cell-style styled))
      (for ([flag (in-list (list (render-style-bold? style)
                                 (render-style-italic? style)
@@ -248,8 +240,7 @@
      (define empty (snapshot-cell snapshot 7))
      (check-false (render-cell-resolved-foreground empty))
      (check-false (render-cell-resolved-background empty))
-     (check-equal? (render-style-color-source
-                    (render-style-foreground (render-cell-style empty)))
+     (check-equal? (render-style-color-source (render-style-foreground (render-cell-style empty)))
                    'none))))
 
 (test-case "all underline variants and soft-wrap metadata are copied"
@@ -261,13 +252,12 @@
        (terminal-write! terminal (string->bytes/utf-8 (format "\33[4:~amX\33[0m" variant))))
      (terminal-write! terminal #"YZ")
      (define snapshot (terminal-render-snapshot terminal))
-     (check-equal?
-      (for/list ([x (in-range 5)])
-        (render-style-underline (render-cell-style (snapshot-cell snapshot x))))
-      '(single double curly dotted dashed))
+     (check-equal? (for/list ([x (in-range 5)])
+                     (render-style-underline (render-cell-style (snapshot-cell snapshot x))))
+                   '(single double curly dotted dashed))
      (check-true (render-row-wrap? (vector-ref (render-snapshot-row-data snapshot) 0)))
-     (check-true
-      (render-row-wrap-continuation? (vector-ref (render-snapshot-row-data snapshot) 1))))))
+     (check-true (render-row-wrap-continuation? (vector-ref (render-snapshot-row-data snapshot)
+                                                            1))))))
 
 (test-case "cursor visibility, blink style, and wide-tail position are copied"
   (call-with-terminal
@@ -284,8 +274,8 @@
      (check-equal? (render-viewport-y (render-cursor-viewport cursor)) 0)
      (check-true (render-viewport-wide-tail? (render-cursor-viewport cursor)))
      (terminal-write! terminal #"\33[?25l")
-     (check-false
-      (render-cursor-visible? (render-snapshot-cursor (terminal-render-snapshot terminal)))))))
+     (check-false (render-cursor-visible? (render-snapshot-cursor (terminal-render-snapshot
+                                                                   terminal)))))))
 
 (test-case "row selection is optional and inclusive through the public snapshot"
   (call-with-terminal
