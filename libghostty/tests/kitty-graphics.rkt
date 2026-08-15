@@ -467,6 +467,17 @@
     (unless (sync/timeout 10 (thread-dead-evt worker))
       (error 'render-race "worker did not terminate"))))
 
+(define (run-race-cleanups! . cleanups)
+  (define first-error #f)
+  (parameterize-break #f
+                      (for ([cleanup (in-list cleanups)])
+                        (with-handlers ([exn? (lambda (error)
+                                                (unless first-error
+                                                  (set! first-error error)))])
+                          (cleanup))))
+  (when first-error
+    (raise first-error)))
+
 (test-case "render races contend and remain coherent across every terminal mutation"
   (for ([operation-name (in-list '(write resize storage reset close))])
     (define terminal (make-terminal 20 5 #:kitty-image-storage-limit 1000000))
@@ -534,10 +545,10 @@
        (check-not-false (sync/timeout 10 (thread-dead-evt mutation-worker)))
        (check-equal? (terminal-closed? terminal) (eq? operation-name 'close)))
      (lambda ()
-       (release-render!)
-       (stop-race-worker! render-worker)
-       (stop-race-worker! mutation-worker)
-       (terminal-close! terminal)))))
+       (run-race-cleanups! release-render!
+                           (lambda () (stop-race-worker! render-worker))
+                           (lambda () (stop-race-worker! mutation-worker))
+                           (lambda () (terminal-close! terminal)))))))
 
 (test-case "same-terminal contention hook reentry fails without recursion or waiting"
   (define terminal (make-terminal 10 5 #:kitty-image-storage-limit 1000000))
@@ -570,8 +581,8 @@
                                       (exn-message (cdr outcome)))
                   (check-not-false (sync/timeout 10 (thread-dead-evt worker))))
                 (lambda ()
-                  (stop-race-worker! worker)
-                  (terminal-close! terminal))))
+                  (run-race-cleanups! (lambda () (stop-race-worker! worker))
+                                      (lambda () (terminal-close! terminal))))))
 
 (test-case "iterator output-cell fallback frees the produced owner exactly once"
   (call-with-terminal (lambda (terminal)
