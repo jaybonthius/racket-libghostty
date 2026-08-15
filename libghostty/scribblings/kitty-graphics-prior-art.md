@@ -10,23 +10,25 @@ Graphics storage belongs independently to each primary or alternate screen. Stor
 
 Stored images are decoded and decompressed. Formats returned by inspection are RGB, RGBA, gray-alpha, or gray; PNG and zlib are protocol inputs rather than stored states. Pixel length is exactly width times height times bytes per pixel. Render info returns pixel/grid size, signed viewport position/visibility, and a clamped source rectangle. Placement rectangle returns an untracked rectangular selection and no value for virtual placements; Racket copies its screen coordinates immediately.
 
-The pinned build reports Kitty support and exports all 16 inspection functions. A compiled probe measured the render-info struct as 56 bytes, alignment 8, with offsets 0, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, and 48 on Linux x86-64. The packaged ABI companion compares these values, every enum/selector, pointer-sized handle, and every exact function signature rather than relying only on the measured platform values.
+The pinned build reports Kitty support and exports all 16 inspection functions. `ghostty_kitty_graphics_get` returns `GHOSTTY_NO_VALUE` only when graphics are omitted at build time; image lookup returns null for an absent ID; image getters return `GHOSTTY_INVALID_VALUE` for null images and `DATA_PTR` returns `GHOSTTY_NO_VALUE` for pending data. Iterator construction can return `GHOSTTY_OUT_OF_MEMORY`; iterator set/get reject null, invalid options, or an unpositioned iterator; `next` returns false at exhaustion. Rectangle and viewport queries return `GHOSTTY_NO_VALUE` for documented virtual/offscreen states, while invalid handle combinations return `GHOSTTY_INVALID_VALUE`. Multi-get stops at the first error and reports the exact completed count.
+
+The pinned Kitty APC parser default is 65 MiB (68,157,440 encoded payload bytes). Terminal option 20 overrides that bound or restores it from a null pointer. Storage is independently bounded by the 10,000,000-byte pinned terminal default; zero disables graphics and deletes stored state. The declarations do not impose another image-dimension cap beyond `uint32_t`, decoded storage, and command limits. A compiled probe measured the render-info struct as 56 bytes, alignment 8, with offsets 0, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, and 48 on Linux x86-64. The packaged ABI companion compares these values, every enum/selector, pointer-sized handle, and every exact function signature rather than relying only on the measured platform values.
 
 A decoder-free direct RGB probe wrote `ESC_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=2,r=1;////////ESC\` and observed generation 2, six copied `#xFF` bytes, 2-by-1 grid geometry, 16-by-16 pixels at 8-by-16 cell size, and visible viewport origin `(0,0)`. New terminals retain the pinned 10,000,000-byte storage default. Setting a limit propagated to both screens. PNG needs the unsynchronized process-global decoder in `sys.h`, so PNG and all system-hook lifecycle policy remain milestone 6.6 work.
 
 ## Reference bindings
 
-Go `kitty_graphics.go` exposes borrowed graphics/image handles, borrowed pixel slices, an owned iterator, all individual and multi-get operations, terminal media/limit controls, and the process-global PNG decoder. `kitty_graphics_test.go` covers PNG happy paths, metadata, geometry, layer filtering, and limits, but not stale-borrow use, pending payloads, generation replacement, break/close races, virtual/offscreen results, or repeated cleanup. Racket adopts its behavioral fixtures but not its raw lifetime model.
+Go `/home/jay/Code/go-libghostty` at `56450a2c8c38e88b3fc306f9c4529ca554a0ce29` exposes borrowed graphics/image handles, borrowed pixel slices, an owned iterator, all individual and multi-get operations, terminal media/limit controls, and the process-global PNG decoder in `kitty_graphics.go` and `sys.go`. `kitty_graphics_test.go` covers PNG happy paths, metadata, geometry, layer filtering, and limits, but not stale-borrow use, pending payloads, generation replacement, break/close races, virtual/offscreen results, or repeated cleanup. Racket adopts its behavioral fixtures but not its raw lifetime model.
 
-Rust `crates/libghostty-vt/src/kitty/graphics.rs` binds graphics, images, and placement iteration to terminal lifetimes, owns iterator cleanup through `Drop`, and maps pending data/offscreen geometry to `Option`. The Ghostling example caches textures by generation and recomputes placement geometry. It has no comparable graphics test module. Racket follows the lifetime safety with a stricter copied transaction rather than lexical borrows.
+Rust `/home/jay/Code/libghostty-rs` at `a28e4ad00d6ba79b98b8cac651ed8976d8500903` binds graphics, images, and placement iteration to terminal lifetimes in `crates/libghostty-vt/src/kitty/graphics.rs`, owns iterator cleanup through `Drop`, and maps pending data/offscreen geometry to `Option`. `example/ghostling_rs/src/main.rs` caches textures by generation and recomputes placement geometry. It has no comparable graphics test module. Racket follows the lifetime safety with a stricter copied transaction rather than lexical borrows.
 
-Python and Node intentionally omit curated Kitty graphics workflows. The browser-terminal spike also explicitly omits graphics. Their omissions support a narrow copied render projection rather than mechanical exposure of the C surface.
+Python `/home/jay/Code/pyghostty` at `ea3172637ecb2c24fded71f6bf1ffc1eeed055b9` and Node `/home/jay/Code/libghostty-vt-node` at `e222ffe744ad57f41c4f1893ba3963e92006be42` intentionally omit curated Kitty graphics workflows. The browser-terminal spike `/home/jay/Code/worktrees/shux/libghostty-poc/spikes/libghostty-terminal` at `a6d50463b60acfb43667d5cb8a2409820ccd33f4` also explicitly omits graphics. Their omissions support a narrow copied render projection rather than mechanical exposure of the C surface.
 
 ## Racket decisions
 
 Kitty graphics extend `render-snapshot` so rows, selection, dirty state, image bytes, and placement geometry are copied under one terminal semaphore. The public API contains only immutable snapshots, placements, images, render info, viewport/source/grid rectangles, and typed storage/Kitty-command limits. A private cache reuses nonpending immutable images only when content identity is unchanged. Iterator ownership is internal and protected by `dynamic-wind`; interrupted copies retain the old cache and do not acknowledge render dirty state.
 
-Omitted constructor storage keywords preserve the existing bounded native default. Integer zero explicitly disables and deletes graphics. The Kitty APC limit may be overridden or reset to its bounded native default. File, temporary-file, shared-memory, generic APC, raw selector, allocator, command-building, animation, query-response, same-z ordering, and process-global PNG APIs remain deferred.
+Omitted constructor storage keywords preserve the existing bounded native default. Integer zero explicitly disables and deletes graphics. The Kitty APC limit may be overridden or reset to its pinned 65 MiB (68,157,440-byte) native default. File, temporary-file, shared-memory, generic APC, raw selector, allocator, command-building, animation, query-response, same-z ordering, and process-global PNG APIs remain deferred.
 
 ## Declaration coverage
 
@@ -40,17 +42,17 @@ Omitted constructor storage keywords preserve the existing bounded native defaul
 | format/compression/layer/iterator-option enums | copied values/options | normalized public symbols or deliberately unbound; every value ABI-checked |
 | terminal options 15 and 20 | copied limits | public typed storage and Kitty APC setters |
 | terminal data 26 and 30 | copied limit / borrowed graphics | typed public limit getter / private render acquisition |
-| `ghostty_kitty_graphics_get` | borrowed storage query | private bound for generation/iterator population |
+| `ghostty_kitty_graphics_get` | borrowed query; no-value when unsupported | private bound for generation/iterator population |
 | `ghostty_kitty_graphics_image` | borrowed lookup, null on miss | private bound; missing placement image is invariant failure |
-| `ghostty_kitty_graphics_image_get` | typed copied output / borrowed pixels | private bound; pending maps to copied `#f` |
-| `ghostty_kitty_graphics_image_get_multi` | typed batch copy | private bound for metadata |
-| `ghostty_kitty_graphics_placement_iterator_new` | creates owned iterator | private bound with null output and unwind cleanup |
+| `ghostty_kitty_graphics_image_get` | invalid for null; borrowed pixels; no-value when pending | private bound; pending maps to copied `#f` |
+| `ghostty_kitty_graphics_image_get_multi` | typed batch; stops at first error with written count | private bound for metadata |
+| `ghostty_kitty_graphics_placement_iterator_new` | creates owned iterator or returns out-of-memory | private bound with null output and unwind cleanup |
 | `ghostty_kitty_graphics_placement_iterator_free` | null-safe release | private exactly-once cleanup |
-| `ghostty_kitty_graphics_placement_iterator_set` | mutates layer filter | unbound; all placements carry normalized layer |
+| `ghostty_kitty_graphics_placement_iterator_set` | invalid for null/value mismatch; mutates layer filter | unbound; all placements carry normalized layer |
 | `ghostty_kitty_graphics_placement_next` | advances borrowed view | private bound inside render transaction |
-| `ghostty_kitty_graphics_placement_get` | one typed field | unbound; batch getter used |
-| `ghostty_kitty_graphics_placement_get_multi` | typed batch fields | private bound for copied placement metadata |
-| `ghostty_kitty_graphics_placement_rect` | writes untracked selection | private bound and immediately copied |
+| `ghostty_kitty_graphics_placement_get` | invalid for null/unpositioned iterator | unbound; batch getter used |
+| `ghostty_kitty_graphics_placement_get_multi` | typed batch; stops at first error with written count | private bound for copied placement metadata |
+| `ghostty_kitty_graphics_placement_rect` | untracked selection; no-value for virtual/discarded | private bound and immediately copied |
 | `ghostty_kitty_graphics_placement_pixel_size` | copied geometry | unbound; combined render info used |
 | `ghostty_kitty_graphics_placement_grid_size` | copied geometry | unbound; combined render info used |
 | `ghostty_kitty_graphics_placement_viewport_pos` | optional signed geometry | unbound; combined render info used |
@@ -60,4 +62,4 @@ Omitted constructor storage keywords preserve the existing bounded native defaul
 
 ## Validation checklist
 
-Public tests cover native/default limit configuration, capable empty storage, exact direct RGB and RGBA pixels, zlib decompression, placement/image deduplication, layer values, generation-based cache replacement, screen independence, reset/disable, persistence omission, retained copied values, command-limit rejection/recovery, close races, and deterministic subprocess-isolated breaks after iterator ownership and pixel borrowing. The complete suite, native rebuild/setup, runtime ABI, format/lint, and Scribble must pass. External ASan/LSan/Valgrind and native allocation-failure injection remain residual validation gaps.
+Public tests cover native/default limit configuration, exact and overflowing one-write/split command caps, capable empty storage, exact direct RGB and RGBA pixels, zlib decompression, placement/image deduplication, every layer boundary, inferred and clamped geometry, monotonic placement/image deletion and retransmission generations, screen independence, reset/disable, persistence omission, retained copied values, pinned protocol failure replies and recovery, coherent write/resize/storage/reset/close races, and deterministic subprocess-isolated breaks after raw iterator production, pixel borrowing, and render commit. A private copy-helper seam covers gray, gray-alpha, pending pixels, unsupported format/compression, ID/generation/length/null-pointer/allocation invariants without exposing raw handles. The complete suite, native rebuild/setup, runtime ABI, format/lint, and Scribble must pass. External ASan/LSan/Valgrind and native allocation-failure injection remain residual validation gaps.

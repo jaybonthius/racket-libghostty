@@ -2041,24 +2041,40 @@
                        (ghostty-formatter-free formatter)))))))
 
 (define (terminal-render-snapshot value)
-  (call-with-terminal-pointer
-   'terminal-render-snapshot
-   value
-   (lambda (pointer)
-     (valid-selection-under-lock 'terminal-render-snapshot value pointer)
-     (copy-terminal-render-snapshot
-      pointer
-      (terminal-render-state value)
-      (terminal-row-iterator value)
-      (terminal-row-cells value)
-      (lambda ()
-        (copy-terminal-kitty-graphics 'terminal-render-snapshot
-                                      pointer
-                                      (active-screen 'terminal-render-snapshot pointer)
-                                      (terminal-kitty-cache value)
-                                      run-kitty-graphics-test-hook))
-      (lambda (cache) (set-terminal-kitty-cache! value cache))))))
+  (define committed-snapshot (box #f))
+  (with-handlers ([exn:break? (lambda (error)
+                                (define snapshot (unbox committed-snapshot))
+                                (if snapshot
+                                    snapshot
+                                    (raise error)))])
+    (call-with-terminal-pointer
+     'terminal-render-snapshot
+     value
+     (lambda (pointer)
+       (valid-selection-under-lock 'terminal-render-snapshot value pointer)
+       (copy-terminal-render-snapshot
+        pointer
+        (terminal-render-state value)
+        (terminal-row-iterator value)
+        (terminal-row-cells value)
+        (lambda ()
+          (copy-terminal-kitty-graphics 'terminal-render-snapshot
+                                        pointer
+                                        (active-screen 'terminal-render-snapshot pointer)
+                                        (terminal-kitty-cache value)
+                                        run-kitty-graphics-test-hook))
+        (lambda (cache) (set-terminal-kitty-cache! value cache))
+        (lambda (snapshot) (set-box! committed-snapshot snapshot))
+        run-kitty-graphics-test-hook)))))
+
+(define (terminal-kitty-cache-generation/test value)
+  (call-with-terminal-pointer 'terminal-kitty-cache-generation/test
+                              value
+                              (lambda (_pointer)
+                                (define cache (terminal-kitty-cache value))
+                                (and cache (kitty-graphics-cache-generation cache)))))
 
 (module+ test-support
   (provide call-with-selection-test-hook
-           call-with-kitty-graphics-test-hook))
+           call-with-kitty-graphics-test-hook
+           terminal-kitty-cache-generation/test))

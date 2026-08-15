@@ -131,8 +131,7 @@
         (cons 8 _size)
         (cons 9 _uint64)))
 
-(define (copy-image who image cached run-hook)
-  (define values (query-multi who ghostty-kitty-graphics-image-get-multi image image-fields))
+(define (copy-image-values who expected-id values cached query-pixels run-hook)
   (define id (list-ref values 0))
   (define number (list-ref values 1))
   (define width (list-ref values 2))
@@ -141,6 +140,10 @@
   (define compression (list-ref values 5))
   (define length (list-ref values 6))
   (define generation (list-ref values 7))
+  (unless (= id expected-id)
+    (error who "native image ID ~a does not match placement image ID ~a" id expected-id))
+  (when (zero? generation)
+    (error who "native stored image has an invalid zero generation"))
   (unless (zero? compression)
     (error who "native image retained unsupported compression value ~a" compression))
   (define format
@@ -165,7 +168,7 @@
           (kitty-graphics-image-pixels cached))
      cached]
     [else
-     (define-values (result pointer) (query ghostty-kitty-graphics-image-get image 7 _pointer))
+     (define-values (result pointer) (query-pixels))
      (define pixels
        (cond
          [(= result GHOSTTY-NO-VALUE) #f]
@@ -179,6 +182,14 @@
             (memcpy copied pointer length))
           (bytes->immutable-bytes copied)]))
      (kitty-graphics-image id number width height format generation length pixels)]))
+
+(define (copy-image who expected-id image cached run-hook)
+  (copy-image-values who
+                     expected-id
+                     (query-multi who ghostty-kitty-graphics-image-get-multi image image-fields)
+                     cached
+                     (lambda () (query ghostty-kitty-graphics-image-get image 7 _pointer))
+                     run-hook))
 
 (define placement-fields
   (list (cons 1 _uint32)
@@ -204,22 +215,18 @@
      (define iterator-output (malloc _pointer))
      (ptr-set! iterator-output _pointer #f)
      (define iterator #f)
-     (define owned? #f)
+     (define released? #f)
      (dynamic-wind
       void
       (lambda ()
         (parameterize-break
          #f
          (define result (ghostty-kitty-graphics-placement-iterator-new/into #f iterator-output))
+         (run-hook 'iterator-produced)
          (set! iterator (ghostty-kitty-graphics-placement-iterator-output-ref iterator-output))
-         (unless (= result GHOSTTY-SUCCESS)
-           (when iterator
-             (ghostty-kitty-graphics-placement-iterator-free iterator)
-             (set! iterator #f))
-           (check-ghostty-result who result))
+         (check-ghostty-result who result)
          (unless iterator
            (error who "native Kitty placement iterator constructor returned a null handle"))
-         (set! owned? #t)
          (run-hook 'iterator-owned))
         (check-ghostty-result who (ghostty-kitty-graphics-get graphics 1 iterator-output))
         (define same-generation? (and cached (= generation (kitty-graphics-cache-generation cached))))
@@ -240,11 +247,13 @@
                (define image (ghostty-kitty-graphics-image graphics image-id))
                (unless image
                  (error who "native placement references missing image ~a" image-id))
+               (define current-image (hash-ref images image-id #f))
                (define cached-image (and old-images (hash-ref old-images image-id #f)))
                (define copied-image
                  (cond
+                   [current-image current-image]
                    [(and same-generation? cached-image) cached-image]
-                   [else (copy-image who image cached-image run-hook)]))
+                   [else (copy-image who image-id image cached-image run-hook)]))
                (set! images (hash-set images image-id copied-image))
                (define z (list-ref values 5))
                (define placement
@@ -262,7 +271,15 @@
         (values (kitty-graphics-snapshot generation placements immutable-images)
                 (kitty-graphics-cache generation immutable-images)))
       (lambda ()
-        (parameterize-break #f
-                            (when (and owned? iterator)
-                              (set! owned? #f)
-                              (ghostty-kitty-graphics-placement-iterator-free iterator)))))]))
+        (parameterize-break
+         #f
+         (unless released?
+           (set! released? #t)
+           (define owned-iterator (or iterator (ptr-ref iterator-output _pointer)))
+           (when owned-iterator
+             (cpointer-push-tag! owned-iterator 'GhosttyKittyGraphicsPlacementIterator)
+             (ptr-set! iterator-output _pointer #f)
+             (ghostty-kitty-graphics-placement-iterator-free owned-iterator))))))]))
+
+(module+ test-support
+  (provide copy-image-values))

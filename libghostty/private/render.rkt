@@ -306,7 +306,14 @@
   (ptr-set! clean _int 0)
   (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-set state 0 clean)))
 
-(define (copy-terminal-render-snapshot terminal state iterator cells copy-kitty commit-kitty)
+(define (copy-terminal-render-snapshot terminal
+                                       state
+                                       iterator
+                                       cells
+                                       copy-kitty
+                                       commit-kitty
+                                       publish-snapshot
+                                       run-hook)
   (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-update state terminal))
   (define columns (render-state-query 'terminal-render-snapshot state 1 _uint16))
   (define rows (render-state-query 'terminal-render-snapshot state 2 _uint16))
@@ -328,5 +335,9 @@
     (error 'terminal-render-snapshot "native row iterator exceeded the viewport height"))
   (define-values (kitty-graphics candidate-cache) (copy-kitty))
   (define snapshot (render-snapshot columns rows dirty colors cursor row-data kitty-graphics))
-  (parameterize-break #f (acknowledge! state iterator rows) (commit-kitty candidate-cache))
-  snapshot)
+  (parameterize-break #f
+                      (run-hook 'render-commit)
+                      (acknowledge! state iterator rows)
+                      (commit-kitty candidate-cache)
+                      (publish-snapshot snapshot)
+                      snapshot))
