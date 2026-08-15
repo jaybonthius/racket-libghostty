@@ -106,7 +106,7 @@
      (terminal-write! terminal #"m")
      (check-equal? (terminal-continuation-bytes terminal) #""))))
 
-(test-case "continuation replay is equivalent and suppresses committed effects"
+(test-case "continuation replay is equivalent and suppresses embedded effects"
   (define source (make-terminal 20 2 #:continuation-max-bytes 32))
   (define replay (make-terminal 20 2 #:continuation-max-bytes 32))
   (define source-bells 0)
@@ -116,14 +116,17 @@
    (lambda ()
      (terminal-set-bell-handler! source (lambda () (set! source-bells (add1 source-bells))))
      (terminal-set-bell-handler! replay (lambda () (set! replay-bells (add1 replay-bells))))
-     (terminal-write! source #"\a\33[31")
+     (terminal-write! source #"\33[\a31")
      (define continuation (terminal-continuation-bytes source))
      (check-equal? continuation #"\33[31")
      (check-equal? source-bells 1)
+     (check-false (terminal-vt-ground? source))
      (terminal-write! replay continuation)
      (check-equal? replay-bells 0)
+     (check-false (terminal-vt-ground? replay))
      (terminal-write! source #"mX")
      (terminal-write! replay #"mX")
+     (check-equal? (terminal-vt-ground? source) (terminal-vt-ground? replay))
      (check-equal? (terminal->plain-text source) (terminal->plain-text replay))
      (check-equal? (terminal->plain-text replay) "X")
      (check-equal? (list source-bells replay-bells) '(1 0)))
