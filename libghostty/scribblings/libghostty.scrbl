@@ -48,9 +48,10 @@ Reports whether @racket[value] is a terminal handle.
 }
 
 @defproc[(make-terminal [columns (integer-in 0 65535)]
-                        [rows (integer-in 0 65535)])
+                        [rows (integer-in 0 65535)]
+                        [#:continuation-max-bytes continuation-max-bytes (integer-in 0 18446744073709551615) 0])
          terminal?]{
-Creates an owned terminal. Both dimensions must be positive; zero is accepted at the Racket contract boundary so libghostty can report its structured @racket['invalid-value] result.
+Creates an owned terminal. Both dimensions must be positive; zero is accepted at the Racket contract boundary so libghostty can report its structured @racket['invalid-value] result. A nonzero @racket[continuation-max-bytes] enables replay-safe continuation tracking before user input; zero leaves the native default disabled.
 
 The terminal is not reentrant. The binding serializes every operation touching one terminal. Call @racket[terminal-close!] when finished; an exactly-once finalizer is a fallback for abandoned terminals.
 }
@@ -77,8 +78,28 @@ Resizes the terminal and reflows the primary screen. Zero dimensions produce a s
 }
 
 @defproc[(terminal-write! [terminal terminal?] [data bytes?]) void?]{
-Feeds VT-encoded bytes through the terminal parser. Malformed terminal input is handled best-effort by libghostty and is not reported as a write failure. An empty byte string is a no-op.
+Feeds VT-encoded bytes through the terminal parser. Malformed terminal input is handled best-effort by libghostty and is not reported as a write failure. An empty byte string is a no-op. This operation is also the replay path for bytes returned by @racket[terminal-continuation-bytes]; there is no separate restore handle or API.
 }
+
+@subsection{Continuation Buffers}
+
+Continuation tracking retains only the canonical byte suffix needed to reconstruct an unfinished VT sequence or UTF-8 codepoint in an otherwise equivalent terminal at ground. It is not a screen, scrollback, mode, or terminal snapshot. Every operation below is serialized with all other access to the same terminal, rejects a closed handle, and follows the same callback-time nonblocking lock and same-terminal reentrancy rules as other terminal operations.
+
+@defproc[(terminal-continuation-max-bytes [terminal terminal?]) (integer-in 0 18446744073709551615)]{Returns the configured native @tt{size_t} cap. Zero means disabled. The value remains observable while the current continuation is temporarily unavailable.}
+
+@defproc[(terminal-set-continuation-max-bytes! [terminal terminal?] [limit (integer-in 0 18446744073709551615)]) void?]{Sets the native continuation cap. Zero disables tracking and discards retained replay data. Lowering the cap below retained data, or enabling while the parser is already unfinished, makes current export unavailable because missing bytes cannot be reconstructed. Raising the cap does not repair that state. Tracking repairs after a later write reaches ground or contains a fresh replay start.}
+
+@defproc[(terminal-vt-ground? [terminal terminal?]) boolean?]{Reports whether both VT parsing and UTF-8 decoding are stateless. At ground, out-of-band VT input may be inserted without splitting an unfinished sequence.}
+
+@defproc[(terminal-continuation-bytes [terminal terminal?]) (and/c bytes? immutable?)]{Returns an immutable Racket-owned copy of the current canonical continuation. Enabled tracking at ground returns immutable empty bytes. Disabled tracking and a temporarily unavailable continuation both raise @racket[exn:fail:ghostty?] with result @racket['invalid-value], because the native ABI does not distinguish them.
+
+The operation requests a native allocation, copies exactly its returned length, and unconditionally releases it with @tt{ghostty_free} using the matching default allocator and exact length, including zero. Returned bytes remain valid after later writes, policy changes, disabling, reset, or terminal close. Native pointers, allocator objects, borrowed views, caller buffers, and writer callbacks never cross the public seam.}
+
+@defproc[(terminal-write-until-ground! [terminal terminal?] [data bytes?]) (values exact-nonnegative-integer? boolean?)]{When @racket[terminal] is already at ground, returns @racket[(values 0 #t)] without processing @racket[data]. Otherwise processes only the shortest prefix through the byte that reaches ground. The count includes that boundary byte. If all input is consumed while the stream remains unfinished, the second result is @racket[#f]; native @tt{GHOSTTY_NO_VALUE} is ordinary control flow, not an exception. Empty input is valid.
+
+The caller retains any suffix after the returned count and may later pass it to @racket[terminal-write!]. Continuation tracking and synchronous effects observe only consumed bytes. Effect-handler exceptions use the existing operation-scoped first-value containment: native prefix processing and cleanup finish, then the initiating call re-raises that value.}
+
+The public interface deliberately omits native callback-writer, caller-buffer, borrowed-pointer, and custom-allocator forms because they add transport and lifetime hazards rather than capability. Generic port-backed callbacks belong with ordered snapshot streaming in a later facility. Snapshot encoding and decoding are not part of continuation buffers.
 
 @subsection{Terminal Effects}
 

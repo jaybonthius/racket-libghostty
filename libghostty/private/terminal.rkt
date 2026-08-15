@@ -17,6 +17,11 @@
          terminal-reset!
          terminal-resize!
          terminal-write!
+         terminal-write-until-ground!
+         terminal-continuation-max-bytes
+         terminal-set-continuation-max-bytes!
+         terminal-continuation-bytes
+         terminal-vt-ground?
          terminal->plain-text
          terminal-render-snapshot
          terminal-set-pty-write-handler!
@@ -54,6 +59,10 @@
 
 (define current-callback-terminal (make-parameter #f))
 (define current-terminal-operation (make-parameter #f))
+
+(define continuation-max-bytes-option 31)
+(define continuation-max-bytes-data 36)
+(define vt-ground-data 38)
 
 (define (check-callback-reentrancy who value)
   (when (eq? value (current-callback-terminal))
@@ -94,7 +103,7 @@
                         (lambda () (void/reference-sink value)))
           (loop)))))
 
-(define (make-terminal columns rows)
+(define (make-terminal columns rows #:continuation-max-bytes [continuation-max-bytes 0])
   (check-libghostty-abi!)
   (define pointer #f)
   (define render-state #f)
@@ -116,6 +125,7 @@
     (define-values (terminal-result new-pointer) (ghostty-terminal-new #f columns rows))
     (set! pointer new-pointer)
     (check-ghostty-result 'make-terminal terminal-result)
+    (set-continuation-max-bytes! 'make-terminal pointer continuation-max-bytes)
     (set! effects-state (ghostty-racket-terminal-effects-new))
     (unless effects-state
       (error 'make-terminal "could not allocate terminal effect state"))
@@ -181,18 +191,19 @@
    (lambda (pointer)
      (define operation (terminal-operation (box #f) (box '())))
      (define native-raised #f)
+     (define results '())
      (dynamic-wind void
                    (lambda ()
                      (parameterize ([current-terminal-operation operation])
                        (with-handlers ([(lambda (_value) #t)
                                         (lambda (raised) (set! native-raised (raised-value raised)))])
-                         (procedure pointer))))
+                         (set! results (call-with-values (lambda () (procedure pointer)) list)))))
                    (lambda () (free-operation-allocations! operation)))
      (define handler-raised (unbox (terminal-operation-raised operation)))
      (cond
        [handler-raised (raise (raised-value-value handler-raised))]
        [native-raised (raise (raised-value-value native-raised))]
-       [else (void)]))))
+       [else (apply values results)]))))
 
 (define (terminal-resize! value
                           columns
@@ -215,6 +226,77 @@
                                   (unless (zero? (bytes-length bytes))
                                     (ghostty-terminal-vt-write pointer bytes (bytes-length bytes)))))
   (void))
+
+(define (terminal-write-until-ground! value bytes)
+  (call-with-terminal-operation
+   'terminal-write-until-ground!
+   value
+   (lambda (pointer)
+     (define-values (result consumed)
+       (ghostty-terminal-vt-write-until-ground pointer bytes (bytes-length bytes)))
+     (cond
+       [(= result GHOSTTY-SUCCESS) (values consumed #t)]
+       [(= result GHOSTTY-NO-VALUE) (values consumed #f)]
+       [else
+        (check-ghostty-result 'terminal-write-until-ground! result)
+        (values consumed #f)]))))
+
+(define (set-continuation-max-bytes! who pointer limit)
+  (define native-limit (malloc _size 'atomic))
+  (ptr-set! native-limit _size limit)
+  (check-ghostty-result who
+                        (ghostty-terminal-set pointer continuation-max-bytes-option native-limit)))
+
+(define (terminal-set-continuation-max-bytes! value limit)
+  (call-with-terminal-pointer
+   'terminal-set-continuation-max-bytes!
+   value
+   (lambda (pointer)
+     (set-continuation-max-bytes! 'terminal-set-continuation-max-bytes! pointer limit)))
+  (void))
+
+(define (terminal-continuation-max-bytes value)
+  (call-with-terminal-pointer
+   'terminal-continuation-max-bytes
+   value
+   (lambda (pointer)
+     (define output (malloc _size 'atomic))
+     (ptr-set! output _size 0)
+     (check-ghostty-result 'terminal-continuation-max-bytes
+                           (ghostty-terminal-get pointer continuation-max-bytes-data output))
+     (ptr-ref output _size))))
+
+(define (terminal-vt-ground? value)
+  (call-with-terminal-pointer
+   'terminal-vt-ground?
+   value
+   (lambda (pointer)
+     (define output (malloc _stdbool 'atomic))
+     (ptr-set! output _stdbool #f)
+     (check-ghostty-result 'terminal-vt-ground? (ghostty-terminal-get pointer vt-ground-data output))
+     (ptr-ref output _stdbool))))
+
+(define (copy-continuation-bytes pointer)
+  (define output #f)
+  (define length 0)
+  (dynamic-wind void
+                (lambda ()
+                  (define-values (result new-output new-length)
+                    (ghostty-terminal-continuation-alloc pointer #f))
+                  (set! output new-output)
+                  (set! length new-length)
+                  (check-ghostty-result 'terminal-continuation-bytes result)
+                  (define copied (make-bytes length))
+                  (when (positive? length)
+                    (unless output
+                      (error 'terminal-continuation-bytes
+                             "native continuation supplied a null pointer with a positive length"))
+                    (memcpy copied output length))
+                  (bytes->immutable-bytes copied))
+                (lambda () (ghostty-free #f output length))))
+
+(define (terminal-continuation-bytes value)
+  (call-with-terminal-pointer 'terminal-continuation-bytes value copy-continuation-bytes))
 
 (define (copy-effect-bytes pointer length)
   (define output (make-bytes length))

@@ -18,6 +18,7 @@
          ghostty-racket-mouse-format-size
          ghostty-racket-mouse-encoder-option-size
          ghostty-racket-size-report-style-size
+         ghostty-racket-terminal-continuation-abi-check
          ghostty-racket-render-state-row-selection-size
          ghostty-racket-render-state-row-selection-align
          ghostty-racket-render-state-row-selection-start-x-offset
@@ -60,6 +61,10 @@
 (define-size ghostty-racket-mouse-format-size ghostty_racket_mouse_format_size)
 (define-size ghostty-racket-mouse-encoder-option-size ghostty_racket_mouse_encoder_option_size)
 (define-size ghostty-racket-size-report-style-size ghostty_racket_size_report_style_size)
+
+(define-ghostty-abi ghostty-racket-terminal-continuation-abi-check
+                    (_fun -> _bool)
+                    #:c-id ghostty_racket_terminal_continuation_abi_check)
 
 (define-ghostty-abi ghostty-racket-render-state-row-selection-size
                     (_fun -> _size)

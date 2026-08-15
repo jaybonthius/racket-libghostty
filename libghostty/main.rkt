@@ -40,7 +40,10 @@
           [libghostty-type-layouts (-> hash?)]
           [check-libghostty-abi! (-> void?)]
           [terminal? (-> any/c boolean?)]
-          [make-terminal (-> (integer-in 0 65535) (integer-in 0 65535) terminal?)]
+          [make-terminal
+           (->* [(integer-in 0 65535) (integer-in 0 65535)]
+                [#:continuation-max-bytes (integer-in 0 18446744073709551615)]
+                terminal?)]
           [terminal-closed? (-> terminal? boolean?)]
           [terminal-close! (-> terminal? void?)]
           [terminal-reset! (-> terminal? void?)]
@@ -49,6 +52,13 @@
                 [#:cell-width-px (integer-in 0 4294967295) #:cell-height-px (integer-in 0 4294967295)]
                 void?)]
           [terminal-write! (-> terminal? bytes? void?)]
+          [terminal-write-until-ground!
+           (-> terminal? bytes? (values exact-nonnegative-integer? boolean?))]
+          [terminal-continuation-max-bytes (-> terminal? (integer-in 0 18446744073709551615))]
+          [terminal-set-continuation-max-bytes!
+           (-> terminal? (integer-in 0 18446744073709551615) void?)]
+          [terminal-continuation-bytes (-> terminal? (and/c bytes? immutable?))]
+          [terminal-vt-ground? (-> terminal? boolean?)]
           [terminal->plain-text (-> terminal? string?)]
           [terminal-render-snapshot (-> terminal? render-snapshot?)]
           [terminal-set-pty-write-handler!

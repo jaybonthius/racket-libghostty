@@ -22,6 +22,22 @@ size_t ghostty_racket_mouse_format_size(void) { return sizeof(GhosttyMouseFormat
 size_t ghostty_racket_mouse_encoder_option_size(void) { return sizeof(GhosttyMouseEncoderOption); }
 size_t ghostty_racket_size_report_style_size(void) { return sizeof(GhosttySizeReportStyle); }
 
+bool ghostty_racket_terminal_continuation_abi_check(void) {
+  GhosttyResult (*write_until_ground)(GhosttyTerminal, const uint8_t *, size_t,
+                                      size_t *) =
+      ghostty_terminal_vt_write_until_ground;
+  GhosttyResult (*continuation_alloc)(GhosttyTerminal,
+                                      const GhosttyAllocator *, uint8_t **,
+                                      size_t *) =
+      ghostty_terminal_continuation_alloc;
+  return sizeof(size_t) == 8 && sizeof(GhosttyTerminalOption) == 4 &&
+      GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES == 31 &&
+      sizeof(GhosttyTerminalData) == 4 &&
+      GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES == 36 &&
+      GHOSTTY_TERMINAL_DATA_VT_GROUND == 38 &&
+      write_until_ground != NULL && continuation_alloc != NULL;
+}
+
 size_t ghostty_racket_render_state_row_selection_size(void) {
   return sizeof(GhosttyRenderStateRowSelection);
 }

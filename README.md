@@ -2,7 +2,9 @@
 
 Contracted Racket bindings to [libghostty-vt](https://github.com/ghostty-org/ghostty/blob/main/include/ghostty/vt.h), the terminal-emulation library that powers [Ghostty](https://github.com/ghostty-org/ghostty).
 
-Version 0.1 currently supports Linux x86-64 and is pinned to Ghostty commit `51ed437cd1a202e625feb7fd0577354d81bcc54b`. It provides build and ABI information, owned terminal-to-text operations, synchronous terminal effects with copied immutable payloads and operation-scoped exception containment, fully copied immutable render snapshots, key and mouse input encoding, color and palette utilities, report and paste encoding, Unicode properties, reusable OSC and SGR parsers, device values, and terminal modes.
+Version 0.1 currently supports Linux x86-64 and is pinned to Ghostty commit `51ed437cd1a202e625feb7fd0577354d81bcc54b`. It provides build and ABI information, owned terminal-to-text operations, replay-safe continuation tracking and consumed-prefix writes, synchronous terminal effects with copied immutable payloads and operation-scoped exception containment, fully copied immutable render snapshots, key and mouse input encoding, color and palette utilities, report and paste encoding, Unicode properties, reusable OSC and SGR parsers, device values, and terminal modes.
+
+Continuation export returns immutable copied bytes and uses ordinary terminal writes for replay. A continuation reconstructs only unfinished VT parser or UTF-8 decoder state; it is not a terminal snapshot. Callback-writer, caller-buffer, allocator, port, and snapshot forms remain outside this facility.
 
 Key and mouse events are immutable Racket values. Their encoders are owned, serialized handles with idempotent close, finalizer fallback, immutable byte results, internal buffer growth, and optional call-time synchronization from a terminal. Native event pointers and borrowed key text never cross the public interface.
 

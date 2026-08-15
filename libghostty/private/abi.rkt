@@ -333,6 +333,8 @@
     (check-probed-render-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)
+    (unless (ghostty-racket-terminal-continuation-abi-check)
+      (error 'check-libghostty-abi! "terminal continuation ABI mismatch"))
     (unless (ghostty-racket-terminal-effects-abi-check)
       (error 'check-libghostty-abi! "terminal effect enum or union ABI mismatch"))
     (set! abi-checked? #t))
