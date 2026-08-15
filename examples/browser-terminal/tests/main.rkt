@@ -140,7 +140,8 @@
                    'full
                    test-colors
                    (render-cursor 'block #t #f #f (render-viewport cursor-x 0 wide-tail?))
-                   (vector->immutable-vector (vector test-row))))
+                   (vector->immutable-vector (vector test-row))
+                   #f))
 
 (test-case "snapshot xexpr preserves cell geometry and wide-tail cursor policy"
   (define wide-tail-html (xexpr->string (render-snapshot-xexpr (test-snapshot 1 #t))))

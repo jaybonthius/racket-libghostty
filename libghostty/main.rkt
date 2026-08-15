@@ -8,6 +8,7 @@
          "private/error.rkt"
          "private/grid-reference.rkt"
          "private/input.rkt"
+         "private/kitty-graphics.rkt"
          "private/parsers.rkt"
          "private/render.rkt"
          "private/terminal.rkt"
@@ -20,6 +21,17 @@
                               (= (vector-length value) 256)
                               (for/and ([color (in-vector value)])
                                 (color-rgb? color))))))
+
+(define kitty-graphics-images/c
+  (flat-named-contract 'kitty-graphics-images
+                       (lambda (value)
+                         (and (hash? value)
+                              (immutable? value)
+                              (for/and ([(id image) (in-hash value)])
+                                (and (exact-integer? id)
+                                     (<= 0 id 4294967295)
+                                     (kitty-graphics-image? image)
+                                     (= id (kitty-graphics-image-id image))))))))
 
 (provide (contract-out
           [exn:fail:ghostty? (-> any/c boolean?)]
@@ -43,7 +55,9 @@
           [terminal? (-> any/c boolean?)]
           [make-terminal
            (->* [(integer-in 0 65535) (integer-in 0 65535)]
-                [#:continuation-max-bytes (integer-in 0 18446744073709551615)]
+                [#:continuation-max-bytes (integer-in 0 18446744073709551615)
+                 #:kitty-image-storage-limit (or/c #f (integer-in 0 18446744073709551615))
+                 #:kitty-graphics-max-bytes (or/c #f (integer-in 0 18446744073709551615))]
                 terminal?)]
           [terminal-closed? (-> terminal? boolean?)]
           [terminal-close! (-> terminal? void?)]
@@ -58,6 +72,12 @@
           [terminal-continuation-max-bytes (-> terminal? (integer-in 0 18446744073709551615))]
           [terminal-set-continuation-max-bytes!
            (-> terminal? (integer-in 0 18446744073709551615) void?)]
+          [terminal-kitty-image-storage-limit
+           (-> terminal? (or/c #f (integer-in 0 18446744073709551615)))]
+          [terminal-set-kitty-image-storage-limit!
+           (-> terminal? (integer-in 0 18446744073709551615) void?)]
+          [terminal-set-kitty-graphics-max-bytes!
+           (-> terminal? (or/c #f (integer-in 0 18446744073709551615)) void?)]
           [terminal-continuation-bytes (-> terminal? (and/c bytes? immutable?))]
           [terminal-vt-ground? (-> terminal? boolean?)]
           (struct terminal-grid-point
@@ -311,8 +331,48 @@
                                                   [dirty (or/c 'clean 'partial 'full)]
                                                   [colors render-colors?]
                                                   [cursor render-cursor?]
-                                                  [row-data
-                                                   (and/c (vectorof render-row?) immutable?)]))
+                                                  [row-data (and/c (vectorof render-row?) immutable?)]
+                                                  [kitty-graphics
+                                                   (or/c #f kitty-graphics-snapshot?)]))
+          (struct kitty-graphics-snapshot
+                  ([generation (integer-in 0 18446744073709551615)]
+                   [placements (and/c (vectorof kitty-graphics-placement?) immutable?)]
+                   [images kitty-graphics-images/c]))
+          (struct kitty-graphics-placement
+                  ([image-id (integer-in 0 4294967295)]
+                   [placement-id (integer-in 0 4294967295)]
+                   [virtual? boolean?]
+                   [x-offset (integer-in 0 4294967295)]
+                   [y-offset (integer-in 0 4294967295)]
+                   [z (integer-in -2147483648 2147483647)]
+                   [layer (or/c 'below-background 'below-text 'above-text)]
+                   [render-info kitty-graphics-render-info?]
+                   [grid-rectangle (or/c #f kitty-graphics-grid-rectangle?)]))
+          (struct kitty-graphics-image
+                  ([id (integer-in 0 4294967295)] [number (integer-in 0 4294967295)]
+                                                  [width (integer-in 0 4294967295)]
+                                                  [height (integer-in 0 4294967295)]
+                                                  [format (or/c 'rgb 'rgba 'gray-alpha 'gray)]
+                                                  [generation (integer-in 0 18446744073709551615)]
+                                                  [data-length (integer-in 0 18446744073709551615)]
+                                                  [pixels (or/c #f (and/c bytes? immutable?))]))
+          (struct kitty-graphics-render-info
+                  ([pixel-width (integer-in 0 4294967295)]
+                   [pixel-height (integer-in 0 4294967295)]
+                   [grid-columns (integer-in 0 4294967295)]
+                   [grid-rows (integer-in 0 4294967295)]
+                   [viewport (or/c #f kitty-graphics-viewport-position?)]
+                   [source-rectangle kitty-graphics-source-rectangle?]))
+          (struct kitty-graphics-viewport-position
+                  ([column (integer-in -2147483648 2147483647)]
+                   [row (integer-in -2147483648 2147483647)]))
+          (struct kitty-graphics-source-rectangle
+                  ([x (integer-in 0 4294967295)] [y (integer-in 0 4294967295)]
+                                                 [width (integer-in 0 4294967295)]
+                                                 [height (integer-in 0 4294967295)]))
+          (struct kitty-graphics-grid-rectangle
+                  ([screen (or/c 'primary 'alternate)] [start terminal-grid-point?]
+                                                       [end terminal-grid-point?]))
           (struct render-colors
                   ([background color-rgb?] [foreground color-rgb?]
                                            [cursor (or/c #f color-rgb?)]

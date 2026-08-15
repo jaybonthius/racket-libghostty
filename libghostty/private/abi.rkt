@@ -10,6 +10,7 @@
          "ffi/formatter.rkt"
          "ffi/grid-reference.rkt"
          "ffi/io.rkt"
+         "ffi/kitty-graphics.rkt"
          "ffi/mouse-encoder.rkt"
          "ffi/mouse-event.rkt"
          "ffi/point.rkt"
@@ -318,6 +319,36 @@
                         (hash-ref offsets (car entry))
                         ((cdr entry)))))
 
+(define (check-probed-kitty-layouts)
+  (define fields
+    (list (cons 'size _size)
+          (cons 'pixel-width _uint32)
+          (cons 'pixel-height _uint32)
+          (cons 'grid-cols _uint32)
+          (cons 'grid-rows _uint32)
+          (cons 'viewport-col _int32)
+          (cons 'viewport-row _int32)
+          (cons 'viewport-visible _stdbool)
+          (cons 'source-x _uint32)
+          (cons 'source-y _uint32)
+          (cons 'source-width _uint32)
+          (cons 'source-height _uint32)))
+  (check-equal-layout 'GhosttyKittyGraphicsPlacementRenderInfo
+                      'size
+                      (ctype-sizeof _GhosttyKittyGraphicsPlacementRenderInfo)
+                      (ghostty-racket-kitty-render-info-size))
+  (check-equal-layout 'GhosttyKittyGraphicsPlacementRenderInfo
+                      'alignment
+                      (ctype-alignof _GhosttyKittyGraphicsPlacementRenderInfo)
+                      (ghostty-racket-kitty-render-info-align))
+  (define offsets (field-offsets fields))
+  (for ([field (in-list fields)]
+        [index (in-naturals)])
+    (check-equal-layout 'GhosttyKittyGraphicsPlacementRenderInfo
+                        (format "field ~a offset" (car field))
+                        (hash-ref offsets (car field))
+                        (ghostty-racket-kitty-render-info-offset index))))
+
 (define (check-probed-sgr-layouts)
   (check-equal-layout 'GhosttySgrUnknown
                       'size
@@ -402,12 +433,15 @@
     (check-input-scalar-layouts)
     (check-probed-render-layouts)
     (check-probed-selection-layouts)
+    (check-probed-kitty-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)
     (unless (ghostty-racket-terminal-continuation-abi-check)
       (error 'check-libghostty-abi! "terminal continuation ABI mismatch"))
     (unless (ghostty-racket-selection-abi-check)
       (error 'check-libghostty-abi! "selection or tracked grid reference ABI mismatch"))
+    (unless (ghostty-racket-kitty-graphics-abi-check)
+      (error 'check-libghostty-abi! "Kitty graphics ABI mismatch"))
     (unless (ghostty-racket-snapshot-abi-check)
       (error 'check-libghostty-abi! "snapshot ABI mismatch"))
     (unless (ghostty-racket-terminal-effects-abi-check)

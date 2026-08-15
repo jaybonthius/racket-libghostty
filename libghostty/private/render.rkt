@@ -22,7 +22,7 @@
          copy-native-style
          copy-terminal-render-snapshot)
 
-(struct render-snapshot (columns rows dirty colors cursor row-data) #:transparent)
+(struct render-snapshot (columns rows dirty colors cursor row-data kitty-graphics) #:transparent)
 (struct render-colors (background foreground cursor palette) #:transparent)
 (struct render-cursor (style visible? blinking? password-input? viewport) #:transparent)
 (struct render-viewport (x y wide-tail?) #:transparent)
@@ -306,7 +306,7 @@
   (ptr-set! clean _int 0)
   (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-set state 0 clean)))
 
-(define (copy-terminal-render-snapshot terminal state iterator cells)
+(define (copy-terminal-render-snapshot terminal state iterator cells copy-kitty commit-kitty)
   (check-ghostty-result 'terminal-render-snapshot (ghostty-render-state-update state terminal))
   (define columns (render-state-query 'terminal-render-snapshot state 1 _uint16))
   (define rows (render-state-query 'terminal-render-snapshot state 2 _uint16))
@@ -326,6 +326,7 @@
        (copy-row iterator cells columns y))))
   (when (ghostty-render-state-row-iterator-next iterator)
     (error 'terminal-render-snapshot "native row iterator exceeded the viewport height"))
-  (define snapshot (render-snapshot columns rows dirty colors cursor row-data))
-  (acknowledge! state iterator rows)
+  (define-values (kitty-graphics candidate-cache) (copy-kitty))
+  (define snapshot (render-snapshot columns rows dirty colors cursor row-data kitty-graphics))
+  (parameterize-break #f (acknowledge! state iterator rows) (commit-kitty candidate-cache))
   snapshot)

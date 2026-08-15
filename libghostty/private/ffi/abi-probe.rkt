@@ -28,6 +28,10 @@
          ghostty-racket-selection-format-options-trim-offset
          ghostty-racket-selection-format-options-selection-offset
          ghostty-racket-selection-abi-check
+         ghostty-racket-kitty-render-info-size
+         ghostty-racket-kitty-render-info-align
+         ghostty-racket-kitty-render-info-offset
+         ghostty-racket-kitty-graphics-abi-check
          ghostty-racket-snapshot-abi-check
          ghostty-racket-render-state-row-selection-size
          ghostty-racket-render-state-row-selection-align
@@ -94,6 +98,15 @@
 (define-ghostty-abi ghostty-racket-selection-abi-check
                     (_fun -> _bool)
                     #:c-id ghostty_racket_selection_abi_check)
+
+(define-size ghostty-racket-kitty-render-info-size ghostty_racket_kitty_render_info_size)
+(define-size ghostty-racket-kitty-render-info-align ghostty_racket_kitty_render_info_align)
+(define-ghostty-abi ghostty-racket-kitty-render-info-offset
+                    (_fun _size -> _size)
+                    #:c-id ghostty_racket_kitty_render_info_offset)
+(define-ghostty-abi ghostty-racket-kitty-graphics-abi-check
+                    (_fun -> _bool)
+                    #:c-id ghostty_racket_kitty_graphics_abi_check)
 
 (define-ghostty-abi ghostty-racket-snapshot-abi-check
                     (_fun -> _bool)

@@ -49,9 +49,11 @@ Reports whether @racket[value] is a terminal handle.
 
 @defproc[(make-terminal [columns (integer-in 0 65535)]
                         [rows (integer-in 0 65535)]
-                        [#:continuation-max-bytes continuation-max-bytes (integer-in 0 18446744073709551615) 0])
+                        [#:continuation-max-bytes continuation-max-bytes (integer-in 0 18446744073709551615) 0]
+                        [#:kitty-image-storage-limit kitty-image-storage-limit (or/c #f (integer-in 0 18446744073709551615)) #f]
+                        [#:kitty-graphics-max-bytes kitty-graphics-max-bytes (or/c #f (integer-in 0 18446744073709551615)) #f])
          terminal?]{
-Creates an owned terminal. Both dimensions must be positive; zero is accepted at the Racket contract boundary so libghostty can report its structured @racket['invalid-value] result. A nonzero @racket[continuation-max-bytes] enables replay-safe continuation tracking before user input; zero leaves the native default disabled.
+Creates an owned terminal. Both dimensions must be positive; zero is accepted at the Racket contract boundary so libghostty can report its structured @racket['invalid-value] result. A nonzero @racket[continuation-max-bytes] enables replay-safe continuation tracking before user input; zero leaves the native default disabled. Omitted @racket[kitty-image-storage-limit] preserves the pinned native 10,000,000-byte default, while zero explicitly disables Kitty graphics. Omitted @racket[kitty-graphics-max-bytes] preserves the bounded pinned Kitty APC default; an integer installs an override before caller input.
 
 The terminal is not reentrant. The binding serializes every operation touching one terminal. Call @racket[terminal-close!] when finished; an exactly-once finalizer is a fallback for abandoned terminals.
 }
@@ -65,7 +67,7 @@ Reports whether @racket[terminal] has been closed.
 }
 
 @defproc[(terminal-reset! [terminal terminal?]) void?]{
-Performs a full terminal reset. The current dimensions are preserved.
+Performs a full terminal reset. The current dimensions are preserved. Active-screen selections, Kitty graphics storage, and the private copied-image cache are cleared.
 }
 
 @defproc[(terminal-resize! [terminal terminal?]
@@ -100,6 +102,16 @@ The operation requests a native allocation, copies exactly its returned length, 
 The caller retains any suffix after the returned count and may later pass it to @racket[terminal-write!]. Continuation tracking and synchronous effects observe only consumed bytes. Effect-handler exceptions use the existing operation-scoped first-value containment: native prefix processing and cleanup finish, then the initiating call re-raises that value.}
 
 Continuation buffers remain distinct from persistent snapshots. Their public interface deliberately omits caller buffers, borrowed pointers, custom allocators, and transport callbacks.
+
+@subsection{Kitty Graphics Limits}
+
+@defproc[(terminal-kitty-image-storage-limit [terminal terminal?]) (or/c #f (integer-in 0 18446744073709551615))]{Returns the active screen's image-storage limit. @racket[#f] means the loaded native build lacks Kitty graphics; zero means a capable build with graphics disabled.}
+
+@defproc[(terminal-set-kitty-image-storage-limit! [terminal terminal?] [limit (integer-in 0 18446744073709551615)]) void?]{Applies @racket[limit] to every initialized primary and alternate screen. Zero disables Kitty graphics and deletes images and placements. Successful mutation clears the private copied-image cache.}
+
+@defproc[(terminal-set-kitty-graphics-max-bytes! [terminal terminal?] [limit (or/c #f (integer-in 0 18446744073709551615))]) void?]{Overrides the maximum bytes retained for one Kitty APC command. @racket[#f] restores the bounded pinned native default. Protocol parse, media, and storage failures are reported through Kitty replies rather than as failures from best-effort @racket[terminal-write!].}
+
+Direct RGB, RGBA, and zlib-compressed protocol input can be inspected through render snapshots; copied images also represent native gray and gray-alpha decoded results if encountered. PNG decoding, file, temporary-file, and shared-memory media remain deferred because they require process-global callback or host security policy. The binding does not construct Kitty commands.
 
 @subsection{Grid Points and Tracked References}
 
@@ -267,7 +279,21 @@ The first snapshot is normally @racket['full]. A successful snapshot acknowledge
 
 Every nested struct is an immutable Racket value, every palette, row, and cell vector is immutable, and every grapheme string is copied and immutable. A returned snapshot remains valid after later writes, updates, reset, resize, or close. Calling this operation after close raises @racket[exn:fail:ghostty:closed?].}
 
-@defstruct*[render-snapshot ([columns exact-nonnegative-integer?] [rows exact-nonnegative-integer?] [dirty (or/c 'clean 'partial 'full)] [colors render-colors?] [cursor render-cursor?] [row-data vector?])]{A complete coordinate-stable viewport. @racket[row-data] has exactly @racket[rows] entries, and each row has exactly @racket[columns] cells, including wide-character spacer cells.}
+@defstruct*[render-snapshot ([columns exact-nonnegative-integer?] [rows exact-nonnegative-integer?] [dirty (or/c 'clean 'partial 'full)] [colors render-colors?] [cursor render-cursor?] [row-data vector?] [kitty-graphics (or/c #f kitty-graphics-snapshot?)])]{A complete coordinate-stable viewport. @racket[row-data] has exactly @racket[rows] entries, and each row has exactly @racket[columns] cells, including wide-character spacer cells. @racket[kitty-graphics] is @racket[#f] only when the loaded native build lacks support; capable empty or disabled storage returns an empty copied graphics snapshot.}
+
+@defstruct*[kitty-graphics-snapshot ([generation exact-nonnegative-integer?] [placements (and/c vector? immutable?)] [images (and/c hash? immutable?)])]{Copied active-screen graphics content coherent with the render rows. Placements preserve native iterator order within this snapshot, but no cross-snapshot order is promised. @racket[images] contains exactly the unique images referenced by placements. Generation stamps are process-wide content identities; scrolling and resize can change geometry without changing them.}
+
+@defstruct*[kitty-graphics-placement ([image-id exact-nonnegative-integer?] [placement-id exact-nonnegative-integer?] [virtual? boolean?] [x-offset exact-nonnegative-integer?] [y-offset exact-nonnegative-integer?] [z exact-integer?] [layer (or/c 'below-background 'below-text 'above-text)] [render-info kitty-graphics-render-info?] [grid-rectangle (or/c #f kitty-graphics-grid-rectangle?)])]{One copied placement. Viewport and grid geometry are recomputed on every render. A virtual or discarded placement has no grid rectangle. Same-z order across snapshots is unspecified.}
+
+@defstruct*[kitty-graphics-image ([id exact-nonnegative-integer?] [number exact-nonnegative-integer?] [width exact-nonnegative-integer?] [height exact-nonnegative-integer?] [format (or/c 'rgb 'rgba 'gray-alpha 'gray)] [generation exact-nonnegative-integer?] [data-length exact-nonnegative-integer?] [pixels (or/c #f (and/c bytes? immutable?))])]{Decoded, decompressed copied image data. @racket[pixels] is @racket[#f] while a native payload is pending; @racket[data-length] remains its expected decoded size. Stored PNG or compressed state is rejected as a native invariant violation. Unchanged nonpending pixels may be shared between immutable snapshots through a private generation cache.}
+
+@defstruct*[kitty-graphics-render-info ([pixel-width exact-nonnegative-integer?] [pixel-height exact-nonnegative-integer?] [grid-columns exact-nonnegative-integer?] [grid-rows exact-nonnegative-integer?] [viewport (or/c #f kitty-graphics-viewport-position?)] [source-rectangle kitty-graphics-source-rectangle?])]{Resolved render geometry. @racket[viewport] is absent for virtual or fully off-screen placements; partially visible positions may be negative.}
+
+@defstruct*[kitty-graphics-viewport-position ([column exact-integer?] [row exact-integer?])]{Signed viewport-relative placement origin.}
+
+@defstruct*[kitty-graphics-source-rectangle ([x exact-nonnegative-integer?] [y exact-nonnegative-integer?] [width exact-nonnegative-integer?] [height exact-nonnegative-integer?])]{Resolved and image-clamped source pixel rectangle.}
+
+@defstruct*[kitty-graphics-grid-rectangle ([screen (or/c 'primary 'alternate)] [start terminal-grid-point?] [end terminal-grid-point?])]{Copied screen-space placement bounds. Endpoints are valid ordinary Racket values and do not expose native selections or grid references.}
 
 @defstruct*[render-colors ([background color-rgb?] [foreground color-rgb?] [cursor (or/c #f color-rgb?)] [palette (and/c vector? immutable?)])]{Default colors, optional explicit cursor color, and the copied immutable 256-color palette.}
 

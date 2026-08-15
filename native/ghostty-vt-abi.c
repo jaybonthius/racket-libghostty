@@ -1,6 +1,7 @@
 #include <ghostty/vt/grid_ref_tracked.h>
 #include <ghostty/vt/io.h>
 #include <ghostty/vt/key.h>
+#include <ghostty/vt/kitty_graphics.h>
 #include <ghostty/vt/mouse.h>
 #include <ghostty/vt/render.h>
 #include <ghostty/vt/screen.h>
@@ -216,6 +217,154 @@ bool ghostty_racket_selection_abi_check(void) {
       select_all != NULL && select_output != NULL && format_alloc != NULL &&
       selection_adjust != NULL && selection_order != NULL &&
       selection_contains != NULL;
+}
+
+size_t ghostty_racket_kitty_render_info_size(void) {
+  return sizeof(GhosttyKittyGraphicsPlacementRenderInfo);
+}
+
+size_t ghostty_racket_kitty_render_info_align(void) {
+  return _Alignof(GhosttyKittyGraphicsPlacementRenderInfo);
+}
+
+size_t ghostty_racket_kitty_render_info_offset(size_t field) {
+  const size_t offsets[] = {
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, size),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, pixel_width),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, pixel_height),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, grid_cols),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, grid_rows),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, viewport_col),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, viewport_row),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, viewport_visible),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, source_x),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, source_y),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, source_width),
+      offsetof(GhosttyKittyGraphicsPlacementRenderInfo, source_height),
+  };
+  return field < sizeof(offsets) / sizeof(offsets[0]) ? offsets[field] : SIZE_MAX;
+}
+
+bool ghostty_racket_kitty_graphics_abi_check(void) {
+  GhosttyResult (*graphics_get)(GhosttyKittyGraphics,
+                                GhosttyKittyGraphicsData,
+                                void *) = ghostty_kitty_graphics_get;
+  GhosttyKittyGraphicsImage (*graphics_image)(GhosttyKittyGraphics,
+                                               uint32_t) =
+      ghostty_kitty_graphics_image;
+  GhosttyResult (*image_get)(GhosttyKittyGraphicsImage,
+                             GhosttyKittyGraphicsImageData,
+                             void *) = ghostty_kitty_graphics_image_get;
+  GhosttyResult (*image_get_multi)(GhosttyKittyGraphicsImage, size_t,
+                                   const GhosttyKittyGraphicsImageData *,
+                                   void **, size_t *) =
+      ghostty_kitty_graphics_image_get_multi;
+  GhosttyResult (*iterator_new)(const GhosttyAllocator *,
+                                GhosttyKittyGraphicsPlacementIterator *) =
+      ghostty_kitty_graphics_placement_iterator_new;
+  void (*iterator_free)(GhosttyKittyGraphicsPlacementIterator) =
+      ghostty_kitty_graphics_placement_iterator_free;
+  GhosttyResult (*iterator_set)(GhosttyKittyGraphicsPlacementIterator,
+                                GhosttyKittyGraphicsPlacementIteratorOption,
+                                const void *) =
+      ghostty_kitty_graphics_placement_iterator_set;
+  bool (*placement_next)(GhosttyKittyGraphicsPlacementIterator) =
+      ghostty_kitty_graphics_placement_next;
+  GhosttyResult (*placement_get)(GhosttyKittyGraphicsPlacementIterator,
+                                 GhosttyKittyGraphicsPlacementData,
+                                 void *) =
+      ghostty_kitty_graphics_placement_get;
+  GhosttyResult (*placement_get_multi)(
+      GhosttyKittyGraphicsPlacementIterator, size_t,
+      const GhosttyKittyGraphicsPlacementData *, void **, size_t *) =
+      ghostty_kitty_graphics_placement_get_multi;
+  GhosttyResult (*placement_rect)(GhosttyKittyGraphicsPlacementIterator,
+                                  GhosttyKittyGraphicsImage,
+                                  GhosttyTerminal,
+                                  GhosttySelection *) =
+      ghostty_kitty_graphics_placement_rect;
+  GhosttyResult (*placement_pixel_size)(GhosttyKittyGraphicsPlacementIterator,
+                                        GhosttyKittyGraphicsImage,
+                                        GhosttyTerminal, uint32_t *,
+                                        uint32_t *) =
+      ghostty_kitty_graphics_placement_pixel_size;
+  GhosttyResult (*placement_grid_size)(GhosttyKittyGraphicsPlacementIterator,
+                                       GhosttyKittyGraphicsImage,
+                                       GhosttyTerminal, uint32_t *,
+                                       uint32_t *) =
+      ghostty_kitty_graphics_placement_grid_size;
+  GhosttyResult (*placement_viewport_pos)(
+      GhosttyKittyGraphicsPlacementIterator, GhosttyKittyGraphicsImage,
+      GhosttyTerminal, int32_t *, int32_t *) =
+      ghostty_kitty_graphics_placement_viewport_pos;
+  GhosttyResult (*placement_source_rect)(GhosttyKittyGraphicsPlacementIterator,
+                                         GhosttyKittyGraphicsImage,
+                                         uint32_t *, uint32_t *, uint32_t *,
+                                         uint32_t *) =
+      ghostty_kitty_graphics_placement_source_rect;
+  GhosttyResult (*placement_render_info)(
+      GhosttyKittyGraphicsPlacementIterator, GhosttyKittyGraphicsImage,
+      GhosttyTerminal, GhosttyKittyGraphicsPlacementRenderInfo *) =
+      ghostty_kitty_graphics_placement_render_info;
+  return sizeof(GhosttyKittyGraphics) == sizeof(void *) &&
+      sizeof(GhosttyKittyGraphicsImage) == sizeof(void *) &&
+      sizeof(GhosttyKittyGraphicsPlacementIterator) == sizeof(void *) &&
+      sizeof(GhosttyKittyGraphicsData) == 4 &&
+      GHOSTTY_KITTY_GRAPHICS_DATA_INVALID == 0 &&
+      GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR == 1 &&
+      GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION == 2 &&
+      sizeof(GhosttyKittyGraphicsPlacementData) == 4 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_INVALID == 0 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID == 1 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID == 2 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL == 3 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET == 4 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET == 5 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_SOURCE_X == 6 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_SOURCE_Y == 7 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_SOURCE_WIDTH == 8 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_SOURCE_HEIGHT == 9 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_COLUMNS == 10 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_ROWS == 11 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z == 12 &&
+      sizeof(GhosttyKittyPlacementLayer) == 4 &&
+      GHOSTTY_KITTY_PLACEMENT_LAYER_ALL == 0 &&
+      GHOSTTY_KITTY_PLACEMENT_LAYER_BELOW_BG == 1 &&
+      GHOSTTY_KITTY_PLACEMENT_LAYER_BELOW_TEXT == 2 &&
+      GHOSTTY_KITTY_PLACEMENT_LAYER_ABOVE_TEXT == 3 &&
+      sizeof(GhosttyKittyGraphicsPlacementIteratorOption) == 4 &&
+      GHOSTTY_KITTY_GRAPHICS_PLACEMENT_ITERATOR_OPTION_LAYER == 0 &&
+      sizeof(GhosttyKittyImageFormat) == 4 &&
+      GHOSTTY_KITTY_IMAGE_FORMAT_RGB == 0 &&
+      GHOSTTY_KITTY_IMAGE_FORMAT_RGBA == 1 &&
+      GHOSTTY_KITTY_IMAGE_FORMAT_PNG == 2 &&
+      GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA == 3 &&
+      GHOSTTY_KITTY_IMAGE_FORMAT_GRAY == 4 &&
+      sizeof(GhosttyKittyImageCompression) == 4 &&
+      GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE == 0 &&
+      GHOSTTY_KITTY_IMAGE_COMPRESSION_ZLIB_DEFLATE == 1 &&
+      sizeof(GhosttyKittyGraphicsImageData) == 4 &&
+      GHOSTTY_KITTY_IMAGE_DATA_INVALID == 0 &&
+      GHOSTTY_KITTY_IMAGE_DATA_ID == 1 &&
+      GHOSTTY_KITTY_IMAGE_DATA_NUMBER == 2 &&
+      GHOSTTY_KITTY_IMAGE_DATA_WIDTH == 3 &&
+      GHOSTTY_KITTY_IMAGE_DATA_HEIGHT == 4 &&
+      GHOSTTY_KITTY_IMAGE_DATA_FORMAT == 5 &&
+      GHOSTTY_KITTY_IMAGE_DATA_COMPRESSION == 6 &&
+      GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR == 7 &&
+      GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN == 8 &&
+      GHOSTTY_KITTY_IMAGE_DATA_GENERATION == 9 &&
+      GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT == 15 &&
+      GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY == 20 &&
+      GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT == 26 &&
+      GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS == 30 &&
+      graphics_get != NULL && graphics_image != NULL && image_get != NULL &&
+      image_get_multi != NULL && iterator_new != NULL &&
+      iterator_free != NULL && iterator_set != NULL && placement_next != NULL &&
+      placement_get != NULL && placement_get_multi != NULL &&
+      placement_rect != NULL && placement_pixel_size != NULL &&
+      placement_grid_size != NULL && placement_viewport_pos != NULL &&
+      placement_source_rect != NULL && placement_render_info != NULL;
 }
 
 bool ghostty_racket_snapshot_abi_check(void) {

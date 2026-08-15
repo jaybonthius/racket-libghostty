@@ -15,6 +15,7 @@
          "ffi/snapshot.rkt"
          "ffi/terminal.rkt"
          "grid-reference.rkt"
+         "kitty-graphics.rkt"
          "render.rkt")
 
 (provide terminal?
@@ -27,6 +28,9 @@
          terminal-write-until-ground!
          terminal-continuation-max-bytes
          terminal-set-continuation-max-bytes!
+         terminal-kitty-image-storage-limit
+         terminal-set-kitty-image-storage-limit!
+         terminal-set-kitty-graphics-max-bytes!
          terminal-continuation-bytes
          terminal-vt-ground?
          terminal->snapshot-bytes
@@ -97,6 +101,7 @@
                  effect-roots
                  snapshot-borrows
                  [selection-owner #:mutable]
+                 [kitty-cache #:mutable]
                  finalizer-registered?)
   #:authentic)
 (struct tracked-grid-reference (pointer [terminal #:mutable] [screen #:mutable]) #:authentic)
@@ -130,6 +135,7 @@
 (define current-callback-snapshot-decoder (make-parameter #f))
 (define current-terminal-operation (make-parameter #f))
 (define current-selection-test-hook (make-parameter #f))
+(define current-kitty-graphics-test-hook (make-parameter #f))
 
 (define (call-with-selection-test-hook hook procedure)
   (parameterize ([current-selection-test-hook hook])
@@ -137,6 +143,15 @@
 
 (define (run-selection-test-hook phase)
   (define hook (current-selection-test-hook))
+  (when hook
+    (hook phase)))
+
+(define (call-with-kitty-graphics-test-hook hook procedure)
+  (parameterize ([current-kitty-graphics-test-hook hook])
+    (procedure)))
+
+(define (run-kitty-graphics-test-hook phase)
+  (define hook (current-kitty-graphics-test-hook))
   (when hook
     (hook phase)))
 
@@ -154,6 +169,9 @@
 (define active-screen-data 6)
 (define selection-data 31)
 (define selection-option 21)
+(define kitty-image-storage-limit-option 15)
+(define kitty-graphics-max-bytes-option 20)
+(define kitty-image-storage-limit-data 26)
 (define screen-values (vector 'primary 'alternate))
 (define selection-order-values (vector 'forward 'reverse 'mirrored-forward 'mirrored-reverse))
 (define selection-adjust-values
@@ -246,6 +264,7 @@
                           (cond
                             [(box-cas! pointer-box pointer #f)
                              (release-selection-owner! value)
+                             (set-terminal-kitty-cache! value #f)
                              (ghostty-render-state-row-cells-free (terminal-row-cells value))
                              (ghostty-render-state-row-iterator-free (terminal-row-iterator value))
                              (ghostty-render-state-free (terminal-render-state value))
@@ -316,6 +335,7 @@
                      (make-hasheq)
                      snapshot-borrows
                      #f
+                     #f
                      (box #f)))
      (parameterize-break #f
                          (unless borrow-token
@@ -347,7 +367,11 @@
            (when effects-state
              (ghostty-racket-terminal-effects-free effects-state))]))))))
 
-(define (make-terminal columns rows #:continuation-max-bytes [continuation-max-bytes 0])
+(define (make-terminal columns
+                       rows
+                       #:continuation-max-bytes [continuation-max-bytes 0]
+                       #:kitty-image-storage-limit [kitty-image-storage-limit #f]
+                       #:kitty-graphics-max-bytes [kitty-graphics-max-bytes #f])
   (check-libghostty-abi!)
   (define output (malloc _pointer))
   (ptr-set! output _pointer #f)
@@ -366,7 +390,11 @@
       pointer
       owner
       (lambda (native-pointer)
-        (set-continuation-max-bytes! 'make-terminal native-pointer continuation-max-bytes))))
+        (set-continuation-max-bytes! 'make-terminal native-pointer continuation-max-bytes)
+        (when kitty-image-storage-limit
+          (set-kitty-image-storage-limit! 'make-terminal native-pointer kitty-image-storage-limit))
+        (when kitty-graphics-max-bytes
+          (set-kitty-graphics-max-bytes! 'make-terminal native-pointer kitty-graphics-max-bytes)))))
    (lambda ()
      (parameterize-break #f
                          (when (box-cas! owner 'producer 'freed)
@@ -401,11 +429,13 @@
   (void))
 
 (define (terminal-reset! value)
-  (call-with-terminal-pointer
-   'terminal-reset!
-   value
-   (lambda (pointer)
-     (parameterize-break #f (ghostty-terminal-reset pointer) (release-selection-owner! value))))
+  (call-with-terminal-pointer 'terminal-reset!
+                              value
+                              (lambda (pointer)
+                                (parameterize-break #f
+                                                    (ghostty-terminal-reset pointer)
+                                                    (release-selection-owner! value)
+                                                    (set-terminal-kitty-cache! value #f))))
   (void))
 
 (define (record-handler-raise! operation value)
@@ -498,6 +528,54 @@
      (check-ghostty-result 'terminal-continuation-max-bytes
                            (ghostty-terminal-get pointer continuation-max-bytes-data output))
      (ptr-ref output _size))))
+
+(define (set-kitty-image-storage-limit! who pointer limit)
+  (define native-limit (malloc _uint64 'atomic))
+  (ptr-set! native-limit _uint64 limit)
+  (check-ghostty-result who
+                        (ghostty-terminal-set pointer kitty-image-storage-limit-option native-limit)))
+
+(define (terminal-set-kitty-image-storage-limit! value limit)
+  (call-with-terminal-pointer
+   'terminal-set-kitty-image-storage-limit!
+   value
+   (lambda (pointer)
+     (parameterize-break
+      #f
+      (set-kitty-image-storage-limit! 'terminal-set-kitty-image-storage-limit! pointer limit)
+      (set-terminal-kitty-cache! value #f))))
+  (void))
+
+(define (terminal-kitty-image-storage-limit value)
+  (call-with-terminal-pointer
+   'terminal-kitty-image-storage-limit
+   value
+   (lambda (pointer)
+     (define output (malloc _uint64 'atomic))
+     (ptr-set! output _uint64 0)
+     (define result (ghostty-terminal-get pointer kitty-image-storage-limit-data output))
+     (cond
+       [(= result GHOSTTY-NO-VALUE) #f]
+       [else
+        (check-ghostty-result 'terminal-kitty-image-storage-limit result)
+        (ptr-ref output _uint64)]))))
+
+(define (set-kitty-graphics-max-bytes! who pointer limit)
+  (define native-limit (and limit (malloc _size 'atomic)))
+  (when native-limit
+    (ptr-set! native-limit _size limit))
+  (check-ghostty-result who
+                        (ghostty-terminal-set pointer kitty-graphics-max-bytes-option native-limit)))
+
+(define (terminal-set-kitty-graphics-max-bytes! value limit)
+  (call-with-terminal-pointer
+   'terminal-set-kitty-graphics-max-bytes!
+   value
+   (lambda (pointer)
+     (parameterize-break
+      #f
+      (set-kitty-graphics-max-bytes! 'terminal-set-kitty-graphics-max-bytes! pointer limit))))
+  (void))
 
 (define (terminal-vt-ground? value)
   (call-with-terminal-pointer
@@ -1963,14 +2041,24 @@
                        (ghostty-formatter-free formatter)))))))
 
 (define (terminal-render-snapshot value)
-  (call-with-terminal-pointer 'terminal-render-snapshot
-                              value
-                              (lambda (pointer)
-                                (valid-selection-under-lock 'terminal-render-snapshot value pointer)
-                                (copy-terminal-render-snapshot pointer
-                                                               (terminal-render-state value)
-                                                               (terminal-row-iterator value)
-                                                               (terminal-row-cells value)))))
+  (call-with-terminal-pointer
+   'terminal-render-snapshot
+   value
+   (lambda (pointer)
+     (valid-selection-under-lock 'terminal-render-snapshot value pointer)
+     (copy-terminal-render-snapshot
+      pointer
+      (terminal-render-state value)
+      (terminal-row-iterator value)
+      (terminal-row-cells value)
+      (lambda ()
+        (copy-terminal-kitty-graphics 'terminal-render-snapshot
+                                      pointer
+                                      (active-screen 'terminal-render-snapshot pointer)
+                                      (terminal-kitty-cache value)
+                                      run-kitty-graphics-test-hook))
+      (lambda (cache) (set-terminal-kitty-cache! value cache))))))
 
 (module+ test-support
-  (provide call-with-selection-test-hook))
+  (provide call-with-selection-test-hook
+           call-with-kitty-graphics-test-hook))
