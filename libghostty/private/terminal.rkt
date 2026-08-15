@@ -136,6 +136,7 @@
 (define current-terminal-operation (make-parameter #f))
 (define current-selection-test-hook (make-parameter #f))
 (define current-kitty-graphics-test-hook (make-parameter #f))
+(define current-kitty-graphics-test-hook-active? (make-parameter #f))
 
 (define (call-with-selection-test-hook hook procedure)
   (parameterize ([current-selection-test-hook hook])
@@ -153,7 +154,13 @@
 (define (run-kitty-graphics-test-hook phase)
   (define hook (current-kitty-graphics-test-hook))
   (when hook
-    (hook phase)))
+    (when (current-kitty-graphics-test-hook-active?)
+      (raise-arguments-error 'run-kitty-graphics-test-hook
+                             "recursive Kitty graphics test hook invocation is not allowed"
+                             "phase"
+                             phase))
+    (parameterize ([current-kitty-graphics-test-hook-active? #t])
+      (hook phase))))
 
 (define continuation-max-bytes-option 31)
 (define continuation-max-bytes-data 36)
@@ -221,6 +228,12 @@
      (when (current-kitty-graphics-test-hook)
        (cond
          [(semaphore-try-wait? lock) (semaphore-post lock)]
+         [(current-kitty-graphics-test-hook-active?)
+          (raise-arguments-error
+           who
+           "terminal lock reentry is not allowed from a Kitty graphics test hook"
+           "terminal"
+           value)]
          [else (run-kitty-graphics-test-hook 'terminal-lock-contended)]))
      (call-with-semaphore lock procedure)]))
 

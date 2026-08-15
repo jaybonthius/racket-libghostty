@@ -460,57 +460,118 @@
   (terminal-close! first)
   (terminal-close! second))
 
+(define (stop-race-worker! worker)
+  (when worker
+    (unless (sync/timeout 2 (thread-dead-evt worker))
+      (kill-thread worker))
+    (unless (sync/timeout 10 (thread-dead-evt worker))
+      (error 'render-race "worker did not terminate"))))
+
 (test-case "render races contend and remain coherent across every terminal mutation"
   (for ([operation-name (in-list '(write resize storage reset close))])
     (define terminal (make-terminal 20 5 #:kitty-image-storage-limit 1000000))
-    (terminal-write! terminal direct-rgb)
     (define render-entered (make-semaphore 0))
     (define render-release (make-semaphore 0))
+    (define render-released? #f)
     (define mutation-contended (make-semaphore 0))
     (define render-result (make-channel))
     (define mutation-result (make-channel))
-    (define render-worker
-      (thread (lambda ()
-                (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
-                  (call-with-kitty-graphics-test-hook
-                   (lambda (phase)
-                     (when (eq? phase 'iterator-owned)
-                       (semaphore-post render-entered)
-                       (semaphore-wait render-release)))
-                   (lambda () (channel-put render-result (terminal-render-snapshot terminal))))))))
-    (check-not-false (sync/timeout 10 render-entered))
-    (define mutate!
-      (case operation-name
-        [(write) (lambda () (terminal-write! terminal #"text"))]
-        [(resize) (lambda () (terminal-resize! terminal 21 5 #:cell-width-px 8 #:cell-height-px 16))]
-        [(storage) (lambda () (terminal-set-kitty-image-storage-limit! terminal 2000000))]
-        [(reset) (lambda () (terminal-reset! terminal))]
-        [(close) (lambda () (terminal-close! terminal))]))
-    (define mutation-worker
-      (thread (lambda ()
-                (with-handlers ([exn? (lambda (error) (channel-put mutation-result error))])
-                  (call-with-kitty-graphics-test-hook (lambda (phase)
-                                                        (when (eq? phase 'terminal-lock-contended)
-                                                          (semaphore-post mutation-contended)))
-                                                      (lambda ()
-                                                        (mutate!)
-                                                        (channel-put mutation-result 'completed)))))))
-    (check-not-false (sync/timeout 10 mutation-contended))
-    (check-false (sync/timeout 0 mutation-result))
-    (semaphore-post render-release)
-    (define rendered (sync/timeout 10 render-result))
-    (check-not-false rendered)
-    (when (exn? rendered)
-      (raise rendered))
-    (check-true (render-snapshot? rendered))
-    (check-true (coherent-graphics? (render-snapshot-kitty-graphics rendered)))
-    (define mutation-outcome (sync/timeout 10 mutation-result))
-    (check-not-false mutation-outcome)
-    (unless (or (eq? mutation-outcome 'completed) (exn:fail:ghostty:closed? mutation-outcome))
-      (raise mutation-outcome))
-    (check-not-false (sync/timeout 10 (thread-dead-evt render-worker)))
-    (check-not-false (sync/timeout 10 (thread-dead-evt mutation-worker)))
-    (terminal-close! terminal)))
+    (define render-worker #f)
+    (define mutation-worker #f)
+    (define (release-render!)
+      (unless render-released?
+        (set! render-released? #t)
+        (semaphore-post render-release)))
+    (dynamic-wind
+     void
+     (lambda ()
+       (terminal-write! terminal direct-rgb)
+       (set! render-worker
+             (thread (lambda ()
+                       (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
+                         (call-with-kitty-graphics-test-hook
+                          (lambda (phase)
+                            (when (eq? phase 'iterator-owned)
+                              (semaphore-post render-entered)
+                              (unless (sync/timeout 10 render-release)
+                                (error 'render-race "timed out waiting for render release"))))
+                          (lambda ()
+                            (channel-put render-result (terminal-render-snapshot terminal))))))))
+       (check-not-false (sync/timeout 10 render-entered))
+       (define mutate!
+         (case operation-name
+           [(write) (lambda () (terminal-write! terminal #"text"))]
+           [(resize)
+            (lambda () (terminal-resize! terminal 21 5 #:cell-width-px 8 #:cell-height-px 16))]
+           [(storage) (lambda () (terminal-set-kitty-image-storage-limit! terminal 2000000))]
+           [(reset) (lambda () (terminal-reset! terminal))]
+           [(close) (lambda () (terminal-close! terminal))]))
+       (set! mutation-worker
+             (thread (lambda ()
+                       (with-handlers ([exn? (lambda (error) (channel-put mutation-result error))])
+                         (call-with-kitty-graphics-test-hook
+                          (lambda (phase)
+                            (when (eq? phase 'terminal-lock-contended)
+                              (semaphore-post mutation-contended)))
+                          (lambda ()
+                            (mutate!)
+                            (channel-put mutation-result 'completed)))))))
+       (check-not-false (sync/timeout 10 mutation-contended))
+       (check-false (sync/timeout 0 mutation-result))
+       (release-render!)
+       (define rendered (sync/timeout 10 render-result))
+       (check-not-false rendered)
+       (when (exn? rendered)
+         (raise rendered))
+       (check-true (render-snapshot? rendered))
+       (check-true (coherent-graphics? (render-snapshot-kitty-graphics rendered)))
+       (define mutation-outcome (sync/timeout 10 mutation-result))
+       (check-not-false mutation-outcome)
+       (when (exn? mutation-outcome)
+         (raise mutation-outcome))
+       (check-eq? mutation-outcome 'completed)
+       (check-not-false (sync/timeout 10 (thread-dead-evt render-worker)))
+       (check-not-false (sync/timeout 10 (thread-dead-evt mutation-worker)))
+       (check-equal? (terminal-closed? terminal) (eq? operation-name 'close)))
+     (lambda ()
+       (release-render!)
+       (stop-race-worker! render-worker)
+       (stop-race-worker! mutation-worker)
+       (terminal-close! terminal)))))
+
+(test-case "same-terminal contention hook reentry fails without recursion or waiting"
+  (define terminal (make-terminal 10 5 #:kitty-image-storage-limit 1000000))
+  (define result (make-channel))
+  (define worker #f)
+  (dynamic-wind void
+                (lambda ()
+                  (terminal-write! terminal direct-rgb)
+                  (set! worker
+                        (thread (lambda ()
+                                  (with-handlers ([exn? (lambda (error) (channel-put result error))])
+                                    (define reentry-error #f)
+                                    (define snapshot
+                                      (call-with-kitty-graphics-test-hook
+                                       (lambda (phase)
+                                         (when (eq? phase 'iterator-owned)
+                                           (with-handlers ([exn:fail? (lambda (error)
+                                                                        (set! reentry-error error))])
+                                             (terminal-write! terminal #"reentry"))))
+                                       (lambda () (terminal-render-snapshot terminal))))
+                                    (channel-put result (cons snapshot reentry-error))))))
+                  (define outcome (sync/timeout 10 result))
+                  (check-not-false outcome)
+                  (when (exn? outcome)
+                    (raise outcome))
+                  (check-true (render-snapshot? (car outcome)))
+                  (check-true (coherent-graphics? (render-snapshot-kitty-graphics (car outcome))))
+                  (check-true (exn:fail? (cdr outcome)))
+                  (check-regexp-match #rx"terminal lock reentry.*Kitty graphics test hook"
+                                      (exn-message (cdr outcome)))
+                  (check-not-false (sync/timeout 10 (thread-dead-evt worker))))
+                (lambda ()
+                  (stop-race-worker! worker)
+                  (terminal-close! terminal))))
 
 (test-case "iterator output-cell fallback frees the produced owner exactly once"
   (call-with-terminal (lambda (terminal)
