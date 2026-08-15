@@ -18,6 +18,8 @@
 (provide browser-session?
          browser-session-output
          browser-session-snapshot
+         browser-session-pty-replies
+         browser-session-bell-count
          browser-session-wait
          browser-session-close!
          browser-session-handle-command!
@@ -42,6 +44,10 @@
                   pressed-buttons
                   last-sequence
                   geometry
+                  pending-pty-replies
+                  pending-bells
+                  pty-reply-log
+                  bell-total
                   changes
                   done
                   error
@@ -65,6 +71,28 @@
 (define (normal-pty-eio? error)
   (and (exn:fail:filesystem:errno? error) (= (car (exn:fail:filesystem:errno-errno error)) 5)))
 
+(define (bounded-reply-log replies)
+  (reverse (for/list ([reply (in-list (reverse replies))]
+                      [_index (in-range 32)])
+             reply)))
+
+(define (drain-terminal-effects! session)
+  (define pending-replies (reverse (unbox (browser-session-pending-pty-replies session))))
+  (set-box! (browser-session-pending-pty-replies session) '())
+  (for ([reply (in-list pending-replies)])
+    (write-bytes reply (browser-session-master-output session)))
+  (when (pair? pending-replies)
+    (flush-output (browser-session-master-output session))
+    (set-box! (browser-session-pty-reply-log session)
+              (bounded-reply-log (append (unbox (browser-session-pty-reply-log session))
+                                         pending-replies))))
+  (define bells (unbox (browser-session-pending-bells session)))
+  (set-box! (browser-session-pending-bells session) 0)
+  (when (positive? bells)
+    (set-box! (browser-session-bell-total session)
+              (+ bells (unbox (browser-session-bell-total session)))))
+  (void))
+
 (define (read-pty! session)
   (define master (browser-session-master session))
   (define failure #f)
@@ -81,7 +109,8 @@
                         (call-with-semaphore (browser-session-state-lock session)
                                              (lambda ()
                                                (terminal-write! (browser-session-terminal session)
-                                                                (subbytes buffer 0 count))))
+                                                                (subbytes buffer 0 count))
+                                               (drain-terminal-effects! session)))
                         (signal-change! session 'changed)
                         (loop))))
                   (with-handlers ([exn:fail? (lambda (error)
@@ -102,6 +131,15 @@
   (define key-encoder (make-key-encoder))
   (define geometry (mouse-encoder-size 800 480 10 20 0 0 0 0))
   (define mouse-encoder (make-mouse-encoder #:size geometry))
+  (define pending-pty-replies (box '()))
+  (define pending-bells (box 0))
+  (terminal-set-pty-write-handler! terminal
+                                   (lambda (reply)
+                                     (set-box! pending-pty-replies
+                                               (cons (bytes->immutable-bytes (bytes-copy reply))
+                                                     (unbox pending-pty-replies)))))
+  (terminal-set-bell-handler! terminal
+                              (lambda () (set-box! pending-bells (add1 (unbox pending-bells)))))
   (define-values (process master master-output)
     (with-handlers ([exn? (lambda (error)
                             (mouse-encoder-close! mouse-encoder)
@@ -117,7 +155,7 @@
         "/bin/sh"
         "-c"
         (format
-         "if exec 3<>/dev/tty; then printf '\\033[?1h\\033[?1000h\\033[?1006h\\033[?2004h'; sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
+         "if exec 3<>/dev/tty; then stty raw -echo <&3; printf '\\033[?2004$p' >&3; reply=$(dd bs=1 count=11 <&3 2>/dev/null); stty sane <&3; if [ \"$reply\" != \"$(printf '\\033[?2004;2$y')\" ]; then exit 71; fi; printf '\\033[?1h\\033[?1000h\\033[?1006h\\033[?2004h\\a'; sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
          workflow-marker)))))
   (define session
     (browser-session terminal
@@ -130,6 +168,10 @@
                      (box '())
                      (box 0)
                      (box geometry)
+                     pending-pty-replies
+                     pending-bells
+                     (box '())
+                     (box 0)
                      (make-async-channel)
                      (make-semaphore 0)
                      (box #f)
@@ -144,6 +186,12 @@
 
 (define (browser-session-snapshot session)
   (terminal-render-snapshot (browser-session-terminal session)))
+
+(define (browser-session-pty-replies session)
+  (vector->immutable-vector (list->vector (unbox (browser-session-pty-reply-log session)))))
+
+(define (browser-session-bell-count session)
+  (unbox (browser-session-bell-total session)))
 
 (define (session-finished? session)
   (unbox (browser-session-finished? session)))
@@ -642,7 +690,14 @@
                      (row-xexpr row colors cursor)))))
 
 (define (terminal-xexpr session)
-  (render-snapshot-xexpr (browser-session-snapshot session)))
+  (define rendered (render-snapshot-xexpr (browser-session-snapshot session)))
+  (define attributes (cadr rendered))
+  (define extended
+    (append attributes
+            (list `(data-bell-count ,(number->string (browser-session-bell-count session)))
+                  `(data-pty-reply-count ,(number->string (vector-length (browser-session-pty-replies
+                                                                          session)))))))
+  (cons (car rendered) (cons extended (cddr rendered))))
 
 (define (page-xexpr session)
   `(html (head (meta ((charset "utf-8")))

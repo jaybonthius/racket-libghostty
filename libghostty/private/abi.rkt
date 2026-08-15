@@ -6,6 +6,7 @@
          "ffi/color.rkt"
          "ffi/common.rkt"
          "ffi/device.rkt"
+         "ffi/effects.rkt"
          "ffi/formatter.rkt"
          "ffi/mouse-encoder.rkt"
          "ffi/mouse-event.rkt"
@@ -56,6 +57,27 @@
          (list (cons 'primary _GhosttyDeviceAttributesPrimary)
                (cons 'secondary _GhosttyDeviceAttributesSecondary)
                (cons 'tertiary _GhosttyDeviceAttributesTertiary)))
+   (list 'GhosttyClipboardContent
+         _GhosttyClipboardContent
+         (list (cons 'mime _GhosttyString) (cons 'data _GhosttyString)))
+   (list 'GhosttyClipboardWrite
+         _GhosttyClipboardWrite
+         (list (cons 'size _size)
+               (cons 'location _int)
+               (cons 'contents _pointer)
+               (cons 'contents_len _size)))
+   (list 'GhosttyTerminalDesktopNotification
+         _GhosttyTerminalDesktopNotification
+         (list (cons 'size _size) (cons 'title _GhosttyString) (cons 'body _GhosttyString)))
+   (list 'GhosttyTerminalProgressReport
+         _GhosttyTerminalProgressReport
+         (list (cons 'size _size) (cons 'state _int) (cons 'progress _int8)))
+   (list 'GhosttyTerminalUnknownStringSequence
+         _RacketUnknownPayload
+         (list (cons 'truncated _stdbool) (cons 'content _GhosttyString)))
+   (list 'GhosttyTerminalUnknownSequence
+         _RacketUnknownSequenceStorage
+         (list (cons 'tag _int) (cons 'value (_array _uint64 16))))
    (list 'GhosttyFormatterScreenExtra
          _GhosttyFormatterScreenExtra
          (list (cons 'size _size)
@@ -311,6 +333,8 @@
     (check-probed-render-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)
+    (unless (ghostty-racket-terminal-effects-abi-check)
+      (error 'check-libghostty-abi! "terminal effect enum or union ABI mismatch"))
     (set! abi-checked? #t))
   (void))
 

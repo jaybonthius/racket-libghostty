@@ -51,6 +51,49 @@
           [terminal-write! (-> terminal? bytes? void?)]
           [terminal->plain-text (-> terminal? string?)]
           [terminal-render-snapshot (-> terminal? render-snapshot?)]
+          [terminal-set-pty-write-handler!
+           (-> terminal? (or/c #f (-> (and/c bytes? immutable?) any/c)) void?)]
+          [terminal-set-bell-handler! (-> terminal? (or/c #f (-> any/c)) void?)]
+          [terminal-set-enquiry-handler! (-> terminal? (or/c #f (-> bytes?)) void?)]
+          [terminal-set-xtversion-handler! (-> terminal? (or/c #f (-> bytes?)) void?)]
+          [terminal-set-title-changed-handler!
+           (-> terminal? (or/c #f (-> (and/c bytes? immutable?) any/c)) void?)]
+          (struct terminal-size
+                  ([rows (integer-in 0 65535)] [columns (integer-in 0 65535)]
+                                               [cell-width (integer-in 0 4294967295)]
+                                               [cell-height (integer-in 0 4294967295)]))
+          [terminal-set-size-handler! (-> terminal? (or/c #f (-> (or/c #f terminal-size?))) void?)]
+          [terminal-set-color-scheme-handler!
+           (-> terminal? (or/c #f (-> (or/c #f 'light 'dark))) void?)]
+          [terminal-set-device-attributes-handler!
+           (-> terminal? (or/c #f (-> (or/c #f device-attributes?))) void?)]
+          [terminal-set-pwd-changed-handler!
+           (-> terminal? (or/c #f (-> (and/c bytes? immutable?) any/c)) void?)]
+          (struct clipboard-content
+                  ([mime (and/c bytes? immutable?)] [data (and/c bytes? immutable?)]))
+          (struct clipboard-write
+                  ([location (or/c 'standard 'selection 'primary)]
+                   [contents (and/c (vectorof clipboard-content?) immutable?)]))
+          [terminal-set-clipboard-write-handler!
+           (-> terminal?
+               (or/c #f
+                     (-> clipboard-write?
+                         (or/c 'success 'denied 'unsupported 'busy 'invalid-data 'io-error)))
+               void?)]
+          (struct desktop-notification
+                  ([title (and/c bytes? immutable?)] [body (and/c bytes? immutable?)]))
+          [terminal-set-desktop-notification-handler!
+           (-> terminal? (or/c #f (-> desktop-notification? any/c)) void?)]
+          (struct progress-report
+                  ([state (or/c 'remove 'set 'error 'indeterminate 'pause)]
+                   [progress (or/c #f (integer-in 0 100))]))
+          [terminal-set-progress-handler! (-> terminal? (or/c #f (-> progress-report? any/c)) void?)]
+          (struct unknown-sequence
+                  ([tag (or/c 'apc)] [content (and/c bytes? immutable?)] [truncated? boolean?]))
+          [terminal-set-unknown-sequence-handler!
+           (-> terminal? (or/c #f (-> unknown-sequence? any/c)) void?)]
+          [terminal-set-unknown-max-bytes!
+           (-> terminal? (or/c #f (integer-in 0 18446744073709551615)) void?)]
           [physical-key? (-> any/c boolean?)]
           [key-event? (-> any/c boolean?)]
           [key-event

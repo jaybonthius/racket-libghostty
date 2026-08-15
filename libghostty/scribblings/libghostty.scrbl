@@ -80,6 +80,52 @@ Resizes the terminal and reflows the primary screen. Zero dimensions produce a s
 Feeds VT-encoded bytes through the terminal parser. Malformed terminal input is handled best-effort by libghostty and is not reported as a write failure. An empty byte string is a no-op.
 }
 
+@subsection{Terminal Effects}
+
+Effects run synchronously inside @racket[terminal-write!] or another effect-producing terminal operation. Each setter below registers one handler; @racket[#f] clears it. The binding roots a replacement before native registration, keeps the active callback rooted until replacement, clearing, or terminal free, and frees the terminal before releasing callback roots. Handlers must remain short. A handler may call operations on another terminal, but any public call on the same terminal raises immediately before lock acquisition, so it cannot deadlock.
+
+Borrowed native buffers and descriptors are copied into immutable Racket values before the user handler runs. Callback pointers, userdata, and native structs remain private. If a handler raises, the callback returns its documented safe fallback, native processing finishes, operation-owned response storage is released, and the initiating operation re-raises the identical first exception object. Later exceptions from the same operation do not replace it, and pending exception state never carries into another operation. Enquiry and XTVERSION responses are copied into foreign storage that remains live until the entire initiating operation ends.
+
+@defproc[(terminal-set-pty-write-handler! [terminal terminal?] [handler (or/c #f (-> (and/c bytes? immutable?) any/c))]) void?]{Handles ordered bytes that libghostty sends back to the PTY. The bytes are copied. An exception uses a no-op fallback.}
+
+@defproc[(terminal-set-bell-handler! [terminal terminal?] [handler (or/c #f (-> any/c))]) void?]{Handles every BEL in order, including repeated bells. An exception uses a no-op fallback.}
+
+@defproc[(terminal-set-enquiry-handler! [terminal terminal?] [handler (or/c #f (-> bytes?))]) void?]{Returns bytes for ENQ. Clearing or an exception returns an empty response.}
+
+@defproc[(terminal-set-xtversion-handler! [terminal terminal?] [handler (or/c #f (-> bytes?))]) void?]{Returns the version payload for CSI @tt{> q}. Empty bytes, clearing, or an exception selects libghostty's default version response.}
+
+@defproc[(terminal-set-title-changed-handler! [terminal terminal?] [handler (or/c #f (-> (and/c bytes? immutable?) any/c))]) void?]{Handles OSC 0/2 title changes with the newly stored binary-safe title copied from the terminal. An exception uses a no-op fallback.}
+
+@defstruct*[terminal-size ([rows (integer-in 0 65535)] [columns (integer-in 0 65535)] [cell-width (integer-in 0 4294967295)] [cell-height (integer-in 0 4294967295)])]{A copied response to XTWINOPS size queries. Pixel reports multiply rows or columns by the corresponding cell dimension.}
+
+@defproc[(terminal-set-size-handler! [terminal terminal?] [handler (or/c #f (-> (or/c #f terminal-size?)))]) void?]{Handles CSI 14/16/18 t. @racket[#f] from the handler, clearing, or an exception declines the query.}
+
+@defproc[(terminal-set-color-scheme-handler! [terminal terminal?] [handler (or/c #f (-> (or/c #f 'light 'dark)))]) void?]{Handles CSI ? 996 n. @racket[#f] from the handler, clearing, or an exception declines the query.}
+
+@defproc[(terminal-set-device-attributes-handler! [terminal terminal?] [handler (or/c #f (-> (or/c #f device-attributes?)))]) void?]{Handles DA1, DA2, and DA3 queries using the existing immutable device-attribute values. Primary features contain at most 64 16-bit codes. @racket[#f] from the handler or an exception is passed to native code as a declined query; pinned libghostty may emit its built-in DA1 default.}
+
+@defproc[(terminal-set-pwd-changed-handler! [terminal terminal?] [handler (or/c #f (-> (and/c bytes? immutable?) any/c))]) void?]{Handles OSC 7, OSC 9, and OSC 1337 working-directory changes with the copied raw value. No URI interpretation occurs. An exception uses a no-op fallback.}
+
+@defstruct*[clipboard-content ([mime (and/c bytes? immutable?)] [data (and/c bytes? immutable?)])]{One copied binary-safe MIME representation. Empty @racket[data] is an explicit empty representation.}
+
+@defstruct*[clipboard-write ([location (or/c 'standard 'selection 'primary)] [contents (and/c vector? immutable?)])]{One atomic normalized clipboard write. An empty @racket[contents] vector means clear and is distinct from an empty @racket[clipboard-content] value.}
+
+@defproc[(terminal-set-clipboard-write-handler! [terminal terminal?] [handler (or/c #f (-> clipboard-write? (or/c 'success 'denied 'unsupported 'busy 'invalid-data 'io-error)))]) void?]{Handles normalized OSC 52 and OSC 1337 writes. Read requests and malformed input are ignored by native code. An exception safely returns @racket['io-error]. Protocols without acknowledgements may ignore the result.}
+
+@defstruct*[desktop-notification ([title (and/c bytes? immutable?)] [body (and/c bytes? immutable?)])]{A copied notification; @racket[title] is empty when the protocol omits it.}
+
+@defproc[(terminal-set-desktop-notification-handler! [terminal terminal?] [handler (or/c #f (-> desktop-notification? any/c))]) void?]{Handles OSC 9 and OSC 777 notifications. An exception uses a no-op fallback.}
+
+@defstruct*[progress-report ([state (or/c 'remove 'set 'error 'indeterminate 'pause)] [progress (or/c #f (integer-in 0 100))])]{A tagged OSC 9;4 progress value. @racket[#f] means the percentage was omitted.}
+
+@defproc[(terminal-set-progress-handler! [terminal terminal?] [handler (or/c #f (-> progress-report? any/c))]) void?]{Handles progress reports. An exception uses a no-op fallback.}
+
+@defstruct*[unknown-sequence ([tag (or/c 'apc)] [content (and/c bytes? immutable?)] [truncated? boolean?])]{A copied tagged unsupported sequence. The pinned library reports APC content without delimiters.}
+
+@defproc[(terminal-set-unknown-sequence-handler! [terminal terminal?] [handler (or/c #f (-> unknown-sequence? any/c))]) void?]{Handles normally terminated unsupported sequences after capture is enabled. Malformed, aborted, recognized, and explicitly disabled protocols are ignored. An exception uses a no-op fallback.}
+
+@defproc[(terminal-set-unknown-max-bytes! [terminal terminal?] [limit (or/c #f (integer-in 0 18446744073709551615))]) void?]{Sets retained content bytes per unknown sequence. Zero or @racket[#f] disables capture. A sequence exceeding a positive limit still invokes the handler with truncated content and @racket[truncated?] true.}
+
 @defproc[(terminal->plain-text [terminal terminal?]) string?]{
 Formats the current active screen as UTF-8 plain text. Styling escape sequences are omitted, soft wraps remain line breaks, trailing whitespace is trimmed, and trailing blank rows are omitted.
 

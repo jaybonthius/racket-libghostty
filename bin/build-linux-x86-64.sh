@@ -49,6 +49,7 @@ cp -L "$library" "$PACKAGE/libghostty-vt.so"
 zig cc -std=c11 -O2 -fPIC -shared \
   -I"$PREFIX/include" \
   "$ROOT/native/ghostty-vt-abi.c" \
+  -L"$PREFIX/lib" -lghostty-vt -Wl,-rpath,'$ORIGIN' \
   -o "$PACKAGE/libghostty-vt-abi.so"
 strip "$PACKAGE/libghostty-vt.so" "$PACKAGE/libghostty-vt-abi.so"
 printf '%s\n' "$GHOSTTY_COMMIT" > "$PREFIX/GHOSTTY_COMMIT"
