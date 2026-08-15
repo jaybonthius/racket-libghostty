@@ -256,6 +256,20 @@
   (when first-error
     (raise first-error)))
 
+(define (render-with-limits/count snapshot placement-limit source-pixel-limit encoded-byte-limit)
+  (define encodes 0)
+  (define rendered
+    (call-with-browser-terminal-test-hook (lambda (phase)
+                                            (when (eq? phase 'kitty-image-encoded)
+                                              (set! encodes (add1 encodes))))
+                                          (lambda ()
+                                            (call-with-browser-kitty-render-limits
+                                             placement-limit
+                                             source-pixel-limit
+                                             encoded-byte-limit
+                                             (lambda () (render-snapshot-xexpr snapshot))))))
+  (values rendered encodes))
+
 (test-case "snapshot xexpr preserves cell geometry and wide-tail cursor policy"
   (define wide-tail-html (xexpr->string (render-snapshot-xexpr (test-snapshot 1 #t))))
   (check-true (string-contains? wide-tail-html "class=\"terminal-cell cursor wide\""))
@@ -345,19 +359,57 @@
   (check-true (string-contains? production-html "data-kitty-placement-limit=\"64\""))
   (check-true (string-contains? production-html "data-kitty-source-pixel-limit=\"65536\""))
   (check-true (string-contains? production-html "data-kitty-encoded-byte-limit=\"524288\""))
-  (define placement-limited
-    (call-with-browser-kitty-render-limits 2 10 1000000 (lambda () (render-snapshot-xexpr snapshot))))
+  (define-values (lowest-z-limited lowest-z-encodes) (render-with-limits/count snapshot 2 10 1000000))
+  (check-equal? (map (lambda (element) (string->number (xexpr-attribute element 'data-placement-id)))
+                     (xexpr-elements 'img lowest-z-limited))
+                '(11 13))
+  (check-equal? lowest-z-encodes 1)
+  (define distinct-images
+    (for/list ([id (in-range 1 4)])
+      (test-kitty-image id 'rgb 1 1 (bytes id (+ id 1) (+ id 2)))))
+  (define distinct-snapshot
+    (test-snapshot 0
+                   #f
+                   (test-kitty-graphics (for/list ([id (in-range 1 4)])
+                                          (test-kitty-placement id #:placement-id id #:z id))
+                                        distinct-images)))
+  (define first-distinct-url-length
+    (string-length (xexpr-attribute
+                    (car (xexpr-elements 'img
+                                         (call-with-browser-kitty-render-limits
+                                          1
+                                          10
+                                          1000000
+                                          (lambda () (render-snapshot-xexpr distinct-snapshot)))))
+                    'src)))
+  (define-values (placement-limited placement-encodes)
+    (render-with-limits/count distinct-snapshot 2 10 1000000))
   (check-equal? (length (xexpr-elements 'img placement-limited)) 2)
-  (define source-limited
-    (call-with-browser-kitty-render-limits 10 1 1000000 (lambda () (render-snapshot-xexpr snapshot))))
-  (check-equal? (length (xexpr-elements 'img source-limited)) 1)
+  (check-equal? placement-encodes 2)
+  (define-values (zero-placement zero-placement-encodes)
+    (render-with-limits/count distinct-snapshot 0 10 1000000))
+  (check-equal? (xexpr-elements 'img zero-placement) '())
+  (check-equal? zero-placement-encodes 0)
+  (define-values (source-exact source-exact-encodes) (render-with-limits/count snapshot 10 2 1000000))
+  (check-equal? (length (xexpr-elements 'img source-exact)) 2)
+  (check-equal? source-exact-encodes 1)
+  (define-values (source-one-over source-one-over-encodes)
+    (render-with-limits/count snapshot 10 1 1000000))
+  (check-equal? (length (xexpr-elements 'img source-one-over)) 1)
+  (check-equal? source-one-over-encodes 1)
   (define one-url-length (string-length (car data-urls)))
-  (define encoded-limited
-    (call-with-browser-kitty-render-limits 10
-                                           10
-                                           (sub1 (* 2 one-url-length))
-                                           (lambda () (render-snapshot-xexpr snapshot))))
-  (check-equal? (length (xexpr-elements 'img encoded-limited)) 1))
+  (define-values (encoded-exact encoded-exact-encodes)
+    (render-with-limits/count snapshot 10 10 (* 2 one-url-length)))
+  (check-equal? (length (xexpr-elements 'img encoded-exact)) 2)
+  (check-equal? encoded-exact-encodes 1)
+  (define-values (encoded-one-over encoded-one-over-encodes)
+    (render-with-limits/count snapshot 10 10 (sub1 (* 2 one-url-length))))
+  (check-equal? (length (xexpr-elements 'img encoded-one-over)) 1)
+  (check-equal? encoded-one-over-encodes 1)
+  (define-values (first-oversized first-oversized-encodes)
+    (render-with-limits/count distinct-snapshot 10 10 (sub1 first-distinct-url-length)))
+  (check-equal? (xexpr-elements 'img first-oversized) '())
+  (check-equal? first-oversized-encodes 1))
 
 (test-case "browser adapter sends facts only"
   (define source
@@ -484,9 +536,11 @@
   (define-values (_app session) (make-browser-terminal-app))
   (define resize-entered (make-semaphore 0))
   (define resize-release (make-semaphore 0))
+  (define render-contended (make-semaphore 0))
   (define released? #f)
   (define resize-result (make-channel))
   (define render-result (make-channel))
+  (define render-reentry-error #f)
   (define resize-worker #f)
   (define render-worker #f)
   (define (release-resize!)
@@ -517,10 +571,18 @@
                                                         #:cell-height 15.6)))))))))
      (check-not-false (sync/timeout 10 resize-entered))
      (set! render-worker
-           (thread (lambda ()
-                     (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
-                       (channel-put render-result (browser-session-render-xexpr session))))))
-     (check-false (sync/timeout 0.05 render-result))
+           (thread
+            (lambda ()
+              (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
+                (call-with-browser-terminal-test-hook
+                 (lambda (phase)
+                   (when (eq? phase 'render-state-lock-contended)
+                     (with-handlers ([exn:fail? (lambda (error) (set! render-reentry-error error))])
+                       (browser-session-render-xexpr session))
+                     (semaphore-post render-contended)))
+                 (lambda () (channel-put render-result (browser-session-render-xexpr session))))))))
+     (check-not-false (sync/timeout 10 render-contended))
+     (check-false (sync/timeout 0 render-result))
      (release-resize!)
      (define resize-outcome (receive-with-timeout 'resize-rendezvous resize-result 10))
      (check-eq? resize-outcome 'resize)
@@ -530,6 +592,8 @@
      (check-true (string-contains? html "data-rows=\"6\""))
      (check-true (string-contains? html "--terminal-cell-width:10px;--terminal-cell-height:16px"))
      (check-true (string-contains? html "style=\"left:0px;top:0px;width:20px;height:16px\""))
+     (check-true (exn:fail? render-reentry-error))
+     (check-regexp-match #rx"test hook reentry" (exn-message render-reentry-error))
      (check-not-false (sync/timeout 10 (thread-dead-evt resize-worker)))
      (check-not-false (sync/timeout 10 (thread-dead-evt render-worker))))
    (lambda ()

@@ -42,6 +42,7 @@
 (define workflow-marker "PTY_WORKFLOW_OK 界 é 👩‍💻")
 
 (define current-browser-terminal-test-hook (make-parameter #f))
+(define current-browser-terminal-test-hook-active? (make-parameter #f))
 (define current-browser-kitty-render-placement-limit
   (make-parameter browser-kitty-render-placement-limit))
 (define current-browser-kitty-render-source-pixel-limit
@@ -79,7 +80,13 @@
 (define (run-browser-terminal-test-hook phase)
   (define hook (current-browser-terminal-test-hook))
   (when hook
-    (hook phase)))
+    (when (current-browser-terminal-test-hook-active?)
+      (raise-arguments-error 'browser-terminal-test-hook
+                             "test hook reentry is not allowed"
+                             "phase"
+                             phase))
+    (parameterize ([current-browser-terminal-test-hook-active? #t])
+      (hook phase))))
 
 (define (call-with-browser-terminal-test-hook hook procedure)
   (parameterize ([current-browser-terminal-test-hook hook])
@@ -720,12 +727,15 @@
   (define output (open-output-bytes))
   (unless (send bitmap save-file output 'png)
     (error 'render-snapshot-xexpr "could not encode copied Kitty pixels as PNG"))
-  (string-append "data:image/png;base64,"
-                 (bytes->string/utf-8 (base64-encode (get-output-bytes output) #""))))
+  (define data-url
+    (string-append "data:image/png;base64,"
+                   (bytes->string/utf-8 (base64-encode (get-output-bytes output) #""))))
+  (run-browser-terminal-test-hook 'kitty-image-encoded)
+  data-url)
 
-(struct renderable-kitty-placement (index placement image info viewport source) #:authentic)
+(struct renderable-kitty-placement (placement image info viewport source) #:authentic)
 
-(define (placement->renderable index placement images)
+(define (placement-renderable? placement images)
   (define info (kitty-graphics-placement-render-info placement))
   (define viewport (kitty-graphics-render-info-viewport info))
   (define image (hash-ref images (kitty-graphics-placement-image-id placement)))
@@ -737,17 +747,20 @@
        (positive? (kitty-graphics-source-rectangle-width source))
        (positive? (kitty-graphics-source-rectangle-height source))
        (positive? (kitty-graphics-render-info-pixel-width info))
-       (positive? (kitty-graphics-render-info-pixel-height info))
-       (renderable-kitty-placement index placement image info viewport source)))
+       (positive? (kitty-graphics-render-info-pixel-height info))))
 
-(define (renderable-placement<? left right)
-  (define left-placement (renderable-kitty-placement-placement left))
-  (define right-placement (renderable-kitty-placement-placement right))
-  (define left-z (kitty-graphics-placement-z left-placement))
-  (define right-z (kitty-graphics-placement-z right-placement))
-  (or (< left-z right-z)
-      (and (= left-z right-z)
-           (< (renderable-kitty-placement-index left) (renderable-kitty-placement-index right)))))
+(define (placement->renderable placement images)
+  (define info (kitty-graphics-placement-render-info placement))
+  (renderable-kitty-placement placement
+                              (hash-ref images (kitty-graphics-placement-image-id placement))
+                              info
+                              (kitty-graphics-render-info-viewport info)
+                              (kitty-graphics-render-info-source-rectangle info)))
+
+(define (placement-index<? left-index right-index placements)
+  (define left-z (kitty-graphics-placement-z (vector-ref placements left-index)))
+  (define right-z (kitty-graphics-placement-z (vector-ref placements right-index)))
+  (or (< left-z right-z) (and (= left-z right-z) (< left-index right-index))))
 
 (define (placement-encoding-key renderable)
   (define placement (renderable-kitty-placement-placement renderable))
@@ -788,50 +801,79 @@
                          (kitty-graphics-render-info-pixel-width info)
                          (kitty-graphics-render-info-pixel-height info))))))
 
+(define (placement-index-prefix indices limit)
+  (cond
+    [(or (zero? limit) (null? indices)) '()]
+    [else (cons (car indices) (placement-index-prefix (cdr indices) (sub1 limit)))]))
+
+(define (insert-placement-index index indices placements limit)
+  (cond
+    [(zero? limit) '()]
+    [(null? indices) (list index)]
+    [(placement-index<? index (car indices) placements)
+     (cons index (placement-index-prefix indices (sub1 limit)))]
+    [else (cons (car indices) (insert-placement-index index (cdr indices) placements (sub1 limit)))]))
+
+(define (select-renderables placements images limit)
+  (define capacity (max 0 limit))
+  (define selected-indices
+    (cond
+      [(zero? capacity) '()]
+      [else
+       (for/fold ([selected '()])
+                 ([placement (in-vector placements)]
+                  [index (in-naturals)])
+         (cond
+           [(not (placement-renderable? placement images)) selected]
+           [else (insert-placement-index index selected placements capacity)]))]))
+  (for/list ([index (in-list selected-indices)])
+    (placement->renderable (vector-ref placements index) images)))
+
 (define (kitty-images-xexprs graphics cell-width-px cell-height-px)
   (cond
     [(not graphics) '()]
     [else
      (define images (kitty-graphics-snapshot-images graphics))
-     (define renderables
-       (sort (filter values
-                     (for/list ([placement (in-vector (kitty-graphics-snapshot-placements graphics))]
-                                [index (in-naturals)])
-                       (placement->renderable index placement images)))
-             renderable-placement<?))
      (define placement-limit (current-browser-kitty-render-placement-limit))
+     (define renderables
+       (select-renderables (kitty-graphics-snapshot-placements graphics) images placement-limit))
      (define source-pixel-limit (current-browser-kitty-render-source-pixel-limit))
      (define encoded-byte-limit (current-browser-kitty-render-encoded-byte-limit))
      (define encoding-cache (make-hash))
-     (define emitted 0)
-     (define source-pixels 0)
-     (define encoded-bytes 0)
-     (reverse
-      (for/fold ([output '()]) ([renderable (in-list renderables)])
-        (define source (renderable-kitty-placement-source renderable))
-        (define placement-pixels
-          (* (kitty-graphics-source-rectangle-width source)
-             (kitty-graphics-source-rectangle-height source)))
-        (cond
-          [(or (>= emitted placement-limit) (> (+ source-pixels placement-pixels) source-pixel-limit))
-           output]
-          [else
-           (define key (placement-encoding-key renderable))
-           (define cached-data-url (hash-ref encoding-cache key #f))
-           (define data-url
-             (or cached-data-url
-                 (image-png-data-url (renderable-kitty-placement-image renderable) source)))
-           (define data-url-length (string-length data-url))
-           (cond
-             [(> (+ encoded-bytes data-url-length) encoded-byte-limit) output]
-             [else
-              (unless cached-data-url
-                (hash-set! encoding-cache key data-url))
-              (set! emitted (add1 emitted))
-              (set! source-pixels (+ source-pixels placement-pixels))
-              (set! encoded-bytes (+ encoded-bytes data-url-length))
-              (cons (renderable-placement-xexpr renderable data-url cell-width-px cell-height-px)
-                    output)])])))]))
+     (let loop ([remaining renderables]
+                [output '()]
+                [source-pixels 0]
+                [encoded-bytes 0])
+       (cond
+         [(null? remaining) (reverse output)]
+         [else
+          (define renderable (car remaining))
+          (define source (renderable-kitty-placement-source renderable))
+          (define placement-pixels
+            (* (kitty-graphics-source-rectangle-width source)
+               (kitty-graphics-source-rectangle-height source)))
+          (define next-source-pixels (+ source-pixels placement-pixels))
+          (cond
+            [(> next-source-pixels source-pixel-limit) (reverse output)]
+            [else
+             (define key (placement-encoding-key renderable))
+             (define cached-data-url (hash-ref encoding-cache key #f))
+             (define data-url
+               (or cached-data-url
+                   (image-png-data-url (renderable-kitty-placement-image renderable) source)))
+             (define data-url-length (string-length data-url))
+             (define next-encoded-bytes (+ encoded-bytes data-url-length))
+             (cond
+               [(> next-encoded-bytes encoded-byte-limit) (reverse output)]
+               [else
+                (unless cached-data-url
+                  (hash-set! encoding-cache key data-url))
+                (loop
+                 (cdr remaining)
+                 (cons (renderable-placement-xexpr renderable data-url cell-width-px cell-height-px)
+                       output)
+                 next-source-pixels
+                 next-encoded-bytes)])])]))]))
 
 (define (cell-style-css cell colors)
   (define style (render-cell-style cell))
@@ -932,14 +974,29 @@
          (row-xexpr row colors cursor))
      ,@(kitty-images-xexprs (render-snapshot-kitty-graphics snapshot) cell-width-px cell-height-px))))
 
+(define (call-with-browser-render-state-lock session procedure)
+  (define lock (browser-session-state-lock session))
+  (when (current-browser-terminal-test-hook)
+    (define contended?
+      (parameterize-break #f
+                          (cond
+                            [(semaphore-try-wait? lock)
+                             (semaphore-post lock)
+                             #f]
+                            [else #t])))
+    (when contended?
+      (run-browser-terminal-test-hook 'render-state-lock-contended)))
+  (call-with-semaphore lock procedure))
+
 (define (terminal-xexpr session)
   (define-values (snapshot geometry bell-count pty-reply-count)
-    (call-with-semaphore (browser-session-state-lock session)
-                         (lambda ()
-                           (values (terminal-render-snapshot (browser-session-terminal session))
-                                   (unbox (browser-session-geometry session))
-                                   (unbox (browser-session-bell-total session))
-                                   (length (unbox (browser-session-pty-reply-log session)))))))
+    (call-with-browser-render-state-lock
+     session
+     (lambda ()
+       (values (terminal-render-snapshot (browser-session-terminal session))
+               (unbox (browser-session-geometry session))
+               (unbox (browser-session-bell-total session))
+               (length (unbox (browser-session-pty-reply-log session)))))))
   (define rendered
     (render-snapshot-xexpr snapshot
                            #:cell-width-px (mouse-encoder-size-cell-width geometry)
