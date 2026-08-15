@@ -580,6 +580,16 @@
 
 (test-case "incremental mutation, abandonment, failure, and finalization detach terminals"
   (define encoded (make-large-snapshot))
+  (define live-decoder (make-snapshot-decoder (open-input-bytes encoded)))
+  (define live (snapshot-decoder-ready! live-decoder))
+  (terminal-write! live #"live-before-history")
+  (define live-progress (snapshot-decoder-next! live-decoder))
+  (check-true (snapshot-progress? live-progress))
+  (check-true (positive? (snapshot-progress-rows live-progress)))
+  (check-false (snapshot-decoder-next! live-decoder))
+  (check-regexp-match #rx"live-before-history" (terminal->plain-text live))
+  (terminal-close! live)
+  (snapshot-decoder-close! live-decoder)
   (define resized-decoder (make-snapshot-decoder (open-input-bytes encoded)))
   (define resized (snapshot-decoder-ready! resized-decoder))
   (terminal-resize! resized 21 3)
@@ -681,10 +691,17 @@
   (check-true (snapshot-decoder-closed? failed-decoder))
   (check-true (collect-until-cleared failed-weak)))
 
+(define (block-with-captured-break entered callback-raised)
+  (semaphore-post entered)
+  (with-handlers ([exn:break? (lambda (raised)
+                                (set-box! callback-raised raised)
+                                (raise raised))])
+    (sync/enable-break never-evt)))
+
 (define (check-blocked-snapshot-break make-operation)
   (define entered (make-semaphore 0))
   (define outcome (make-async-channel))
-  (define operation (make-operation entered))
+  (define-values (operation callback-raised) (make-operation entered))
   (define worker
     (thread (lambda ()
               (with-handlers ([(lambda (_value) #t)
@@ -699,7 +716,8 @@
     (kill-thread worker)
     (error 'snapshot-callback-break-test "worker timed out"))
   (thread-wait worker)
-  (check-true (exn:break? reported)))
+  (check-true (exn:break? reported))
+  (check-eq? reported (unbox callback-raised)))
 
 (test-case "blocked snapshot port callbacks contain breaks and preserve native health"
   (for ([_iteration (in-range 5)])
@@ -707,20 +725,21 @@
     (terminal-write! terminal #"break-writer")
     (check-blocked-snapshot-break
      (lambda (entered)
+       (define callback-raised (box #f))
        (define output
          (make-output-port 'blocked-snapshot-output
                            always-evt
                            (lambda (_value _start _end _non-block? _breakable?)
-                             (semaphore-post entered)
-                             never-evt)
+                             (block-with-captured-break entered callback-raised))
                            void))
-       (lambda () (terminal-write-snapshot! terminal output))))
+       (values (lambda () (terminal-write-snapshot! terminal output)) callback-raised)))
     (check-equal? (terminal->plain-text terminal) "break-writer")
     (define encoded (terminal->snapshot-bytes terminal))
     (terminal-close! terminal)
     (check-blocked-snapshot-break
      (lambda (entered)
        (define position 0)
+       (define callback-raised (box #f))
        (define input
          (make-input-port 'blocked-snapshot-input
                           (lambda (destination)
@@ -730,12 +749,10 @@
                                (bytes-copy! destination 0 encoded position (+ position amount))
                                (set! position (+ position amount))
                                amount]
-                              [else
-                               (semaphore-post entered)
-                               never-evt]))
+                              [else (block-with-captured-break entered callback-raised)]))
                           #f
                           void))
-       (lambda () (snapshot-port->terminal input))))
+       (values (lambda () (snapshot-port->terminal input)) callback-raised)))
     (define restored (snapshot-port->terminal (open-input-bytes encoded)))
     (check-equal? (terminal->plain-text restored) "break-writer")
     (terminal-close! restored))
@@ -746,13 +763,12 @@
    (lambda (entered)
      (define position 0)
      (define block? #f)
+     (define callback-raised (box #f))
      (define input
        (make-input-port 'blocked-snapshot-next-input
                         (lambda (destination)
                           (cond
-                            [block?
-                             (semaphore-post entered)
-                             never-evt]
+                            [block? (block-with-captured-break entered callback-raised)]
                             [else
                              (define amount
                                (min 3 (bytes-length destination) (- (bytes-length encoded) position)))
@@ -764,7 +780,7 @@
      (set! incremental-decoder (make-snapshot-decoder input))
      (set! incremental-terminal (snapshot-decoder-ready! incremental-decoder))
      (set! block? #t)
-     (lambda () (snapshot-decoder-next! incremental-decoder))))
+     (values (lambda () (snapshot-decoder-next! incremental-decoder)) callback-raised)))
   (check-true (snapshot-decoder-closed? incremental-decoder))
   (terminal-write! incremental-terminal #"after-next-break")
   (terminal-close! incremental-terminal))
@@ -810,12 +826,54 @@
   (define other (make-terminal 10 2))
   (terminal-write! other #"other")
   (check-exn exn:fail:contract? (lambda () (terminal-write-snapshot! other cross-output)))
+  (define terminal-cross-decoder
+    (make-snapshot-decoder (make-input-port 'terminal-cross-snapshot-input
+                                            (lambda (_destination)
+                                              (terminal->plain-text source)
+                                              eof)
+                                            #f
+                                            void)))
+  (check-exn exn:fail:contract? (lambda () (snapshot-decoder-ready! terminal-cross-decoder)))
+  (check-true (snapshot-decoder-closed? terminal-cross-decoder))
   (break-thread locked-worker)
   (define locked-result (sync/timeout 10 locked-outcome))
   (unless locked-result
     (kill-thread locked-worker)
-    (error 'snapshot-cross-lock-test "worker timed out"))
+    (error 'snapshot-cross-lock-test "terminal worker timed out"))
   (thread-wait locked-worker)
   (check-true (exn:break? locked-result))
+  (define decoder-entered (make-semaphore 0))
+  (define decoder-outcome (make-async-channel))
+  (define locked-decoder
+    (make-snapshot-decoder (make-input-port 'locked-snapshot-input
+                                            (lambda (_destination)
+                                              (semaphore-post decoder-entered)
+                                              never-evt)
+                                            #f
+                                            void)))
+  (define decoder-worker
+    (thread (lambda ()
+              (with-handlers ([(lambda (_value) #t)
+                               (lambda (raised)
+                                 (parameterize-break #f (async-channel-put decoder-outcome raised)))])
+                (snapshot-decoder-ready! locked-decoder)
+                (parameterize-break #f (async-channel-put decoder-outcome 'completed))))))
+  (semaphore-wait decoder-entered)
+  (define decoder-cross-output
+    (make-output-port 'decoder-cross-snapshot-output
+                      always-evt
+                      (lambda (_value _start _end _non-block? _breakable?)
+                        (snapshot-decoder-source-offset locked-decoder)
+                        1)
+                      void))
+  (check-exn exn:fail:contract? (lambda () (terminal-write-snapshot! other decoder-cross-output)))
+  (break-thread decoder-worker)
+  (define decoder-result (sync/timeout 10 decoder-outcome))
+  (unless decoder-result
+    (kill-thread decoder-worker)
+    (error 'snapshot-cross-lock-test "decoder worker timed out"))
+  (thread-wait decoder-worker)
+  (check-true (exn:break? decoder-result))
+  (check-true (snapshot-decoder-closed? locked-decoder))
   (terminal-close! other)
   (terminal-close! source))

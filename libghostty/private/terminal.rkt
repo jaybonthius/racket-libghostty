@@ -122,17 +122,17 @@
 
 (define (call-with-terminal-lock who value procedure)
   (define callback-terminal (current-callback-terminal))
+  (define callback? (or callback-terminal (current-callback-snapshot-decoder)))
   (cond
-    [callback-terminal
+    [callback?
      (check-callback-reentrancy who value)
      (call-with-semaphore (terminal-lock value)
                           procedure
                           (lambda ()
-                            (raise-arguments-error
-                             who
-                             "terminal lock is unavailable during a terminal callback"
-                             "terminal"
-                             value)))]
+                            (raise-arguments-error who
+                                                   "terminal lock is unavailable during a callback"
+                                                   "terminal"
+                                                   value)))]
     [else (call-with-semaphore (terminal-lock value) procedure)]))
 
 (define (check-port-operation-context who)
@@ -151,15 +151,16 @@
 
 (define (call-with-snapshot-decoder-lock who value procedure)
   (define callback-decoder (current-callback-snapshot-decoder))
+  (define callback? (or callback-decoder (current-callback-terminal)))
   (cond
-    [callback-decoder
+    [callback?
      (check-snapshot-decoder-reentrancy who value)
      (call-with-semaphore (snapshot-decoder-lock value)
                           procedure
                           (lambda ()
                             (raise-arguments-error
                              who
-                             "snapshot decoder lock is unavailable during a reader callback"
+                             "snapshot decoder lock is unavailable during a snapshot callback"
                              "snapshot-decoder"
                              value)))]
     [else (call-with-semaphore (snapshot-decoder-lock value) procedure)]))
