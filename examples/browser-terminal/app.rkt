@@ -129,6 +129,8 @@
 
 (define (build-info-xexpr)
   (define info (libghostty-build-info))
+  (define-values (_codepoints grapheme-width)
+    (unicode-grapheme-width (vector #x1f469 #x200d #x1f4bb)))
   `(section ((id "build-info"))
             (h2 "Loaded libghostty-vt")
             (dl (dt "Version")
@@ -138,7 +140,9 @@
                 (dt "SIMD")
                 (dd ,(if (ghostty-build-info-simd? info) "enabled" "disabled"))
                 (dt "ABI-described types")
-                (dd ,(number->string (hash-count (libghostty-type-layouts)))))))
+                (dd ,(number->string (hash-count (libghostty-type-layouts))))
+                (dt "Native grapheme width")
+                (dd ,(number->string grapheme-width)))))
 
 (define (terminal-xexpr session)
   `(section ((id "terminal"))

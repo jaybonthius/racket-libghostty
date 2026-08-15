@@ -5,6 +5,7 @@
 (provide (struct-out exn:fail:ghostty)
          (struct-out exn:fail:ghostty:closed)
          check-ghostty-result
+         raise-ghostty-closed
          raise-terminal-closed)
 
 (struct exn:fail:ghostty exn:fail (result code) #:transparent)
@@ -39,8 +40,11 @@
                              result
                              code))))
 
-(define (raise-terminal-closed who)
-  (raise (exn:fail:ghostty:closed (format "~a: terminal is closed" who)
+(define (raise-ghostty-closed who kind)
+  (raise (exn:fail:ghostty:closed (format "~a: ~a is closed" who kind)
                                   (current-continuation-marks)
                                   'closed
                                   #f)))
+
+(define (raise-terminal-closed who)
+  (raise-ghostty-closed who 'terminal))

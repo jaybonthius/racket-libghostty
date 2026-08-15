@@ -80,6 +80,8 @@
        (define page (bounded-http-get port "/"))
        (check-true (string-contains? page "Loaded libghostty-vt"))
        (check-true (string-contains? page "ABI-described types"))
+       (check-true (string-contains? page "Native grapheme width"))
+       (check-true (regexp-match? #rx"Native grapheme width[^<]*</dt>[^<]*<dd>2</dd>" page))
        (browser-session-wait session 10)
        (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK")
        (define events (receive-with-timeout 'sse-read sse-result 5))

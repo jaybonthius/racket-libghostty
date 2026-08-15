@@ -4,8 +4,11 @@
 (require racket/contract/base
          "private/abi.rkt"
          "private/build-info.rkt"
+         "private/color.rkt"
          "private/error.rkt"
-         "private/terminal.rkt")
+         "private/parsers.rkt"
+         "private/terminal.rkt"
+         "private/utilities.rkt")
 
 (provide (contract-out
           [exn:fail:ghostty? (-> any/c boolean?)]
@@ -36,6 +39,67 @@
                 [#:cell-width-px (integer-in 0 4294967295) #:cell-height-px (integer-in 0 4294967295)]
                 void?)]
           [terminal-write! (-> terminal? bytes? void?)]
-          [terminal->plain-text (-> terminal? string?)]))
+          [terminal->plain-text (-> terminal? string?)]
+          (struct color-rgb
+                  ([red (integer-in 0 255)] [green (integer-in 0 255)] [blue (integer-in 0 255)]))
+          (struct x11-color ([name string?] [color color-rgb?]))
+          [color-parse (-> string? color-rgb?)]
+          [color-parse-x11 (-> string? color-rgb?)]
+          [color-parse-palette-entry (-> string? (values (integer-in 0 255) color-rgb?))]
+          [color-default-palette (-> (and/c vector? immutable?))]
+          [color-generate-palette
+           (->*
+            [color-rgb? color-rgb?]
+            [#:base (or/c #f vector?) #:preserve (listof (integer-in 0 255)) #:harmonious? boolean?]
+            (and/c vector? immutable?))]
+          [color-luminance (-> color-rgb? (real-in 0.0 1.0))]
+          [color-perceived-luminance (-> color-rgb? (real-in 0.0 1.0))]
+          [color-contrast (-> color-rgb? color-rgb? (real-in 1.0 21.0))]
+          [color-x11-colors (-> (and/c vector? immutable?))]
+          [color-scheme-report-encode (-> (or/c 'light 'dark) (and/c bytes? immutable?))]
+          [focus-encode (-> (or/c 'gained 'lost) (and/c bytes? immutable?))]
+          [paste-safe? (-> bytes? boolean?)]
+          [paste-encode (->* [bytes?] [#:bracketed? boolean?] (and/c bytes? immutable?))]
+          [unicode-codepoint-width (-> (integer-in 0 4294967295) (integer-in 0 2))]
+          [unicode-grapheme-width
+           (-> (vectorof (integer-in 0 4294967295))
+               (values exact-nonnegative-integer? (integer-in 0 2)))]
+          (struct terminal-mode ([value (integer-in 0 32767)] [ansi? boolean?]))
+          [terminal-modes (and/c hash? immutable?)]
+          [mode-report-encode
+           (-> terminal-mode?
+               (or/c 'not-recognized 'set 'reset 'permanently-set 'permanently-reset)
+               (and/c bytes? immutable?))]
+          (struct primary-device-attributes
+                  ([conformance-level (integer-in 0 65535)] [features (and/c vector? immutable?)]))
+          (struct secondary-device-attributes
+                  ([device-type (integer-in 0 65535)] [firmware-version (integer-in 0 65535)]
+                                                      [rom-cartridge (integer-in 0 65535)]))
+          (struct tertiary-device-attributes ([unit-id (integer-in 0 4294967295)]))
+          (struct device-attributes
+                  ([primary primary-device-attributes?] [secondary secondary-device-attributes?]
+                                                        [tertiary tertiary-device-attributes?]))
+          [device-conformance-levels (and/c hash? immutable?)]
+          [device-feature-codes (and/c hash? immutable?)]
+          [device-types (and/c hash? immutable?)]
+          [osc-parser? (-> any/c boolean?)]
+          [make-osc-parser (-> osc-parser?)]
+          [osc-parser-closed? (-> osc-parser? boolean?)]
+          [osc-parser-close! (-> osc-parser? void?)]
+          [osc-parser-reset! (-> osc-parser? void?)]
+          [osc-parser-feed! (-> osc-parser? bytes? void?)]
+          [osc-parser-end! (->* [osc-parser?] [(or/c 'bel 'st)] osc-command?)]
+          (struct osc-command ([type symbol?] [data (or/c #f string?)]))
+          [sgr-parser? (-> any/c boolean?)]
+          [make-sgr-parser (-> sgr-parser?)]
+          [sgr-parser-closed? (-> sgr-parser? boolean?)]
+          [sgr-parser-close! (-> sgr-parser? void?)]
+          [sgr-parser-reset! (-> sgr-parser? void?)]
+          [sgr-parser-set-params!
+           (->* [sgr-parser? (vectorof (integer-in 0 65535))] [(or/c #f bytes?)] void?)]
+          [sgr-parser-next! (-> sgr-parser? (or/c #f sgr-attribute?))]
+          (struct sgr-attribute ([tag symbol?] [value any/c]))
+          (struct sgr-unknown
+                  ([full (and/c vector? immutable?)] [partial (and/c vector? immutable?)]))))
 
 (check-libghostty-abi!)
