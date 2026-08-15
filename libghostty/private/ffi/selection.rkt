@@ -27,7 +27,7 @@
          ghostty-terminal-select-line
          ghostty-terminal-select-all
          ghostty-terminal-select-output
-         ghostty-terminal-selection-format-alloc
+         ghostty-terminal-selection-format-alloc/into
          ghostty-terminal-selection-adjust
          ghostty-terminal-selection-order
          ghostty-terminal-selection-contains)
@@ -76,17 +76,9 @@
                 (_fun _GhosttyTerminal _GhosttyGridRef _GhosttySelection-pointer -> _int)
                 #:c-id ghostty_terminal_select_output)
 (define-ghostty
- ghostty-terminal-selection-format-alloc/raw
+ ghostty-terminal-selection-format-alloc/into
  (_fun _GhosttyTerminal _pointer _GhosttyTerminalSelectionFormatOptions _pointer _pointer -> _int)
  #:c-id ghostty_terminal_selection_format_alloc)
-
-(define (ghostty-terminal-selection-format-alloc terminal options)
-  (define output (malloc _pointer))
-  (define length (malloc _size))
-  (ptr-set! output _pointer #f)
-  (ptr-set! length _size 0)
-  (define result (ghostty-terminal-selection-format-alloc/raw terminal #f options output length))
-  (values result (ptr-ref output _pointer) (ptr-ref length _size)))
 
 (define-ghostty ghostty-terminal-selection-adjust
                 (_fun _GhosttyTerminal _GhosttySelection-pointer _int -> _int)

@@ -158,18 +158,18 @@
      (render-selection-range (GhosttyRenderStateRowSelection-start-x value)
                              (GhosttyRenderStateRowSelection-end-x value))]))
 
-(define (copy-style-color value)
+(define (copy-style-color who value)
   (define tag (GhosttyStyleColor-kind value))
   (case tag
     [(0) (render-style-color 'none #f)]
     [(1) (render-style-color 'palette (union-ref (GhosttyStyleColor-value value) 0))]
     [(2) (render-style-color 'rgb (copy-native-rgb (union-ref (GhosttyStyleColor-value value) 1)))]
-    [else (error 'terminal-render-snapshot "unknown style color tag ~a" tag)]))
+    [else (error who "unknown style color tag ~a" tag)]))
 
-(define (copy-native-style value)
-  (render-style (copy-style-color (GhosttyStyle-fg-color value))
-                (copy-style-color (GhosttyStyle-bg-color value))
-                (copy-style-color (GhosttyStyle-underline-color value))
+(define (copy-native-style value [who 'terminal-render-snapshot])
+  (render-style (copy-style-color who (GhosttyStyle-fg-color value))
+                (copy-style-color who (GhosttyStyle-bg-color value))
+                (copy-style-color who (GhosttyStyle-underline-color value))
                 (GhosttyStyle-bold value)
                 (GhosttyStyle-italic value)
                 (GhosttyStyle-faint value)
@@ -178,7 +178,7 @@
                 (GhosttyStyle-invisible value)
                 (GhosttyStyle-strikethrough value)
                 (GhosttyStyle-overline value)
-                (enum-ref 'terminal-render-snapshot underline-values (GhosttyStyle-underline value))))
+                (enum-ref who underline-values (GhosttyStyle-underline value))))
 
 (define (copy-style cells)
   (define output (malloc _GhosttyStyle 'atomic))

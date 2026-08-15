@@ -164,7 +164,7 @@
    (raw-query who ghostty-cell-get raw-cell 8 _stdbool)
    (enum-ref who semantic-content-values (raw-query who ghostty-cell-get raw-cell 9 _int))
    (copy-content-color who raw-cell content)
-   (copy-native-style style-value)))
+   (copy-native-style style-value who)))
 
 (define (copy-row who reference)
   (define row-output (malloc _uint64 'atomic))

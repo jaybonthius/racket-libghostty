@@ -391,11 +391,11 @@
   (void))
 
 (define (terminal-reset! value)
-  (call-with-terminal-pointer 'terminal-reset!
-                              value
-                              (lambda (pointer)
-                                (ghostty-terminal-reset pointer)
-                                (release-selection-owner! value)))
+  (call-with-terminal-pointer
+   'terminal-reset!
+   value
+   (lambda (pointer)
+     (parameterize-break #f (ghostty-terminal-reset pointer) (release-selection-owner! value))))
   (void))
 
 (define (record-handler-raise! operation value)
@@ -1491,10 +1491,11 @@
   (define owner (tracked-grid-reference-terminal value))
   (cond
     [owner
-     (call-with-terminal-lock 'tracked-grid-reference-close!
-                              owner
-                              (lambda () (release-tracked-grid-reference-under-lock! value)))]
-    [else (release-tracked-grid-reference-under-lock! value)])
+     (call-with-terminal-lock
+      'tracked-grid-reference-close!
+      owner
+      (lambda () (parameterize-break #f (release-tracked-grid-reference-under-lock! value))))]
+    [else (parameterize-break #f (release-tracked-grid-reference-under-lock! value))])
   (void))
 
 (define (call-with-open-tracked-grid-reference who value procedure)
@@ -1543,12 +1544,14 @@
      (define native-terminal (unbox (terminal-pointer owner)))
      (unless native-terminal
        (raise-terminal-closed 'tracked-grid-reference-set!))
-     (check-ghostty-result
-      'tracked-grid-reference-set!
-      (ghostty-tracked-grid-ref-set pointer native-terminal (grid-point->native point)))
-     (set-tracked-grid-reference-screen! value
-                                         (active-screen 'tracked-grid-reference-set!
-                                                        native-terminal))))
+     (parameterize-break
+      #f
+      (check-ghostty-result
+       'tracked-grid-reference-set!
+       (ghostty-tracked-grid-ref-set pointer native-terminal (grid-point->native point)))
+      (set-tracked-grid-reference-screen! value
+                                          (active-screen 'tracked-grid-reference-set!
+                                                         native-terminal)))))
   (void))
 
 (define (tracked-grid-reference->snapshot value)
@@ -1576,6 +1579,13 @@
   (check-ghostty-result who (ghostty-terminal-point-from-grid-ref pointer reference 2 output))
   (terminal-grid-point 'screen (GhosttyPointCoordinate-x output) (GhosttyPointCoordinate-y output)))
 
+(define (selection-endpoint->screen-point/maybe pointer reference)
+  (define output (make-GhosttyPointCoordinate 0 0))
+  (define result (ghostty-terminal-point-from-grid-ref pointer reference 2 output))
+  (and
+   (= result GHOSTTY-SUCCESS)
+   (terminal-grid-point 'screen (GhosttyPointCoordinate-x output) (GhosttyPointCoordinate-y output))))
+
 (define (tracked-endpoint->screen-point who tracked)
   (define output (make-GhosttyPointCoordinate 0 0))
   (define result (ghostty-tracked-grid-ref-point tracked 2 output))
@@ -1595,8 +1605,9 @@
        (= (terminal-grid-point-y first) (terminal-grid-point-y second))))
 
 (define (clear-selection-under-lock! who value pointer)
-  (check-ghostty-result who (ghostty-terminal-set pointer selection-option #f))
-  (release-selection-owner! value))
+  (parameterize-break #f
+                      (check-ghostty-result who (ghostty-terminal-set pointer selection-option #f))
+                      (release-selection-owner! value)))
 
 (define (install-selection-under-lock! who value pointer selection)
   (parameterize-break
@@ -1607,6 +1618,7 @@
    (define end-point (selection-endpoint->screen-point who pointer (GhosttySelection-end selection)))
    (define start-tracked #f)
    (define end-tracked #f)
+   (define new-owner #f)
    (define published? #f)
    (dynamic-wind
     void
@@ -1615,18 +1627,13 @@
       (set! end-tracked (create-tracked-grid-reference-pointer who pointer end-point))
       (define fresh-start (resolve-grid-point who pointer start-point))
       (define fresh-end (resolve-grid-point who pointer end-point))
+      (define rectangle? (GhosttySelection-rectangle selection))
       (define fresh-selection
-        (make-GhosttySelection (ctype-sizeof _GhosttySelection)
-                               fresh-start
-                               fresh-end
-                               (GhosttySelection-rectangle selection)))
+        (make-GhosttySelection (ctype-sizeof _GhosttySelection) fresh-start fresh-end rectangle?))
+      (set! new-owner (active-selection-owner screen start-tracked end-tracked rectangle?))
       (check-ghostty-result who (ghostty-terminal-set pointer selection-option fresh-selection))
       (release-selection-owner! value)
-      (set-terminal-selection-owner! value
-                                     (active-selection-owner screen
-                                                             start-tracked
-                                                             end-tracked
-                                                             (GhosttySelection-rectangle selection)))
+      (set-terminal-selection-owner! value new-owner)
       (set! published? #t))
     (lambda ()
       (unless published?
@@ -1649,18 +1656,19 @@
      (define native-result (ghostty-terminal-get pointer selection-data native-selection))
      (define valid-native? (= native-result GHOSTTY-SUCCESS))
      (define matches?
-       (and valid-screen?
-            valid-start?
-            valid-end?
-            valid-native?
-            (equal? (active-selection-owner-rectangle? owner)
-                    (GhosttySelection-rectangle native-selection))
-            (same-grid-point?
-             (tracked-endpoint->screen-point who (active-selection-owner-start-tracked owner))
-             (selection-endpoint->screen-point who pointer (GhosttySelection-start native-selection)))
-            (same-grid-point?
-             (tracked-endpoint->screen-point who (active-selection-owner-end-tracked owner))
-             (selection-endpoint->screen-point who pointer (GhosttySelection-end native-selection)))))
+       (and
+        valid-screen?
+        valid-start?
+        valid-end?
+        valid-native?
+        (equal? (active-selection-owner-rectangle? owner)
+                (GhosttySelection-rectangle native-selection))
+        (same-grid-point?
+         (tracked-endpoint->screen-point who (active-selection-owner-start-tracked owner))
+         (selection-endpoint->screen-point/maybe pointer (GhosttySelection-start native-selection)))
+        (same-grid-point?
+         (tracked-endpoint->screen-point who (active-selection-owner-end-tracked owner))
+         (selection-endpoint->screen-point/maybe pointer (GhosttySelection-end native-selection)))))
      (cond
        [matches? native-selection]
        [else
@@ -1856,20 +1864,29 @@
            unwrap?
            trim?
            selection))
-        (define output #f)
-        (define length 0)
-        (dynamic-wind void
-                      (lambda ()
-                        (define-values (result new-output new-length)
-                          (ghostty-terminal-selection-format-alloc pointer options))
-                        (set! output new-output)
-                        (set! length new-length)
-                        (check-ghostty-result 'terminal-selection->plain-text result)
-                        (define bytes (make-bytes length))
-                        (when (positive? length)
-                          (memcpy bytes output length))
-                        (string->immutable-string (bytes->string/utf-8 bytes)))
-                      (lambda () (ghostty-free #f output length)))]))))
+        (define output-cell (malloc _pointer))
+        (define length-cell (malloc _size))
+        (ptr-set! output-cell _pointer #f)
+        (ptr-set! length-cell _size 0)
+        (dynamic-wind
+         void
+         (lambda ()
+           (check-ghostty-result
+            'terminal-selection->plain-text
+            (ghostty-terminal-selection-format-alloc/into pointer #f options output-cell length-cell))
+           (define output (ptr-ref output-cell _pointer))
+           (define length (ptr-ref length-cell _size))
+           (when (and (positive? length) (not output))
+             (error 'terminal-selection->plain-text
+                    "native formatter supplied a null pointer with a positive length"))
+           (define bytes (make-bytes length))
+           (when (positive? length)
+             (memcpy bytes output length))
+           (string->immutable-string (bytes->string/utf-8 bytes)))
+         (lambda ()
+           (parameterize-break
+            #f
+            (ghostty-free #f (ptr-ref output-cell _pointer) (ptr-ref length-cell _size)))))]))))
 
 (define (make-plain-text-options)
   (define screen
