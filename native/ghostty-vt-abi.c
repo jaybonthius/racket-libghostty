@@ -1,3 +1,4 @@
+#include <ghostty/vt/io.h>
 #include <ghostty/vt/key.h>
 #include <ghostty/vt/mouse.h>
 #include <ghostty/vt/render.h>
@@ -40,9 +41,14 @@ bool ghostty_racket_terminal_continuation_abi_check(void) {
 }
 
 bool ghostty_racket_snapshot_abi_check(void) {
+  GhosttyResult (*encode)(GhosttyTerminal, GhosttyWriter) =
+      ghostty_snapshot_encode;
   GhosttyResult (*encode_alloc)(GhosttyTerminal, const GhosttyAllocator *,
                                 uint8_t **, size_t *) =
       ghostty_snapshot_encode_alloc;
+  GhosttyResult (*decoder_new)(const GhosttyAllocator *,
+                               GhosttySnapshotDecoder *, GhosttyReader) =
+      ghostty_snapshot_decoder_new;
   GhosttyResult (*decoder_new_buf)(const GhosttyAllocator *,
                                    GhosttySnapshotDecoder *, const uint8_t *,
                                    size_t) =
@@ -52,12 +58,22 @@ bool ghostty_racket_snapshot_abi_check(void) {
   GhosttyResult (*decoder_set)(GhosttySnapshotDecoder,
                                GhosttySnapshotDecoderOption, const void *) =
       ghostty_snapshot_decoder_set;
+  GhosttyResult (*decoder_ready)(GhosttySnapshotDecoder, GhosttyTerminal *) =
+      ghostty_snapshot_decoder_ready;
+  GhosttyResult (*decoder_next)(GhosttySnapshotDecoder) =
+      ghostty_snapshot_decoder_next;
   GhosttyResult (*decoder_decode)(GhosttySnapshotDecoder, GhosttyTerminal *) =
       ghostty_snapshot_decoder_decode;
   GhosttyResult (*decoder_get)(GhosttySnapshotDecoder,
                                GhosttySnapshotDecoderData, void *) =
       ghostty_snapshot_decoder_get;
+  GhosttyResult (*decoder_get_multi)(GhosttySnapshotDecoder, size_t,
+                                     const GhosttySnapshotDecoderData *,
+                                     void **, size_t *) =
+      ghostty_snapshot_decoder_get_multi;
   return sizeof(size_t) == 8 &&
+      sizeof(GhosttyReaderFn) == sizeof(void *) &&
+      sizeof(GhosttyWriterFn) == sizeof(void *) &&
       sizeof(GhosttySnapshotDecoder) == sizeof(void *) &&
       sizeof(GhosttySnapshotDecoderOption) == 4 &&
       GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES == 0 &&
@@ -72,9 +88,14 @@ bool ghostty_racket_snapshot_abi_check(void) {
       GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS == 6 &&
       GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING == 7 &&
       GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_VALUE == GHOSTTY_ENUM_MAX_VALUE &&
-      encode_alloc != NULL && decoder_new_buf != NULL &&
-      decoder_free != NULL && decoder_set != NULL &&
-      decoder_decode != NULL && decoder_get != NULL;
+      sizeof(GhosttyTerminalScreen) == 4 &&
+      GHOSTTY_TERMINAL_SCREEN_PRIMARY == 0 &&
+      GHOSTTY_TERMINAL_SCREEN_ALTERNATE == 1 && encode != NULL &&
+      encode_alloc != NULL && decoder_new != NULL &&
+      decoder_new_buf != NULL && decoder_free != NULL &&
+      decoder_set != NULL && decoder_ready != NULL && decoder_next != NULL &&
+      decoder_decode != NULL && decoder_get != NULL &&
+      decoder_get_multi != NULL;
 }
 
 size_t ghostty_racket_render_state_row_selection_size(void) {

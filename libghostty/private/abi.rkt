@@ -8,6 +8,7 @@
          "ffi/device.rkt"
          "ffi/effects.rkt"
          "ffi/formatter.rkt"
+         "ffi/io.rkt"
          "ffi/mouse-encoder.rkt"
          "ffi/mouse-event.rkt"
          "ffi/render.rkt"
@@ -35,6 +36,8 @@
    (list 'GhosttyBuffer
          _GhosttyBuffer
          (list (cons 'ptr _pointer) (cons 'cap _size) (cons 'len _size)))
+   (list 'GhosttyReader _GhosttyReader (list (cons 'read _fpointer) (cons 'userdata _pointer)))
+   (list 'GhosttyWriter _GhosttyWriter (list (cons 'write _fpointer) (cons 'userdata _pointer)))
    (list 'GhosttyColorRgb _GhosttyColorRgb (list (cons 'r _uint8) (cons 'g _uint8) (cons 'b _uint8)))
    (list 'GhosttyColorPaletteMask _GhosttyColorPaletteMask (list (cons 'bits (_array _uint64 4))))
    (list 'GhosttyColorX11Entry

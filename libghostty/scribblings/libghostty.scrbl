@@ -57,7 +57,7 @@ The terminal is not reentrant. The binding serializes every operation touching o
 }
 
 @defproc[(terminal-close! [terminal terminal?]) void?]{
-Releases @racket[terminal]. Repeated calls are safe. Every other operation raises @racket[exn:fail:ghostty:closed?] after close.
+Releases @racket[terminal]. Repeated calls are safe. Every other operation raises @racket[exn:fail:ghostty:closed?] after close. Closing a terminal attached to an incremental snapshot decoder raises @racket[exn:fail:contract?] until FINISH, decoder close, decoder failure, or decoder finalization releases the native borrow.
 }
 
 @defproc[(terminal-closed? [terminal terminal?]) boolean?]{
@@ -99,11 +99,11 @@ The operation requests a native allocation, copies exactly its returned length, 
 
 The caller retains any suffix after the returned count and may later pass it to @racket[terminal-write!]. Continuation tracking and synchronous effects observe only consumed bytes. Effect-handler exceptions use the existing operation-scoped first-value containment: native prefix processing and cleanup finish, then the initiating call re-raises that value.}
 
-The public interface deliberately omits native callback-writer, caller-buffer, borrowed-pointer, and custom-allocator forms because they add transport and lifetime hazards rather than capability. Generic port-backed callbacks belong with ordered snapshot streaming in a later facility. Snapshot encoding and decoding are not part of continuation buffers.
+Continuation buffers remain distinct from persistent snapshots. Their public interface deliberately omits caller buffers, borrowed pointers, custom allocators, and transport callbacks.
 
 @subsection{Buffer-based Snapshots}
 
-A buffer-based snapshot stores persistent terminal state as an unstable pinned-native binary record stream. Version 1 has no compatibility guarantee across Ghostty revisions. Each record has a CRC32C checksum for corruption detection, not authentication; callers must not treat untrusted snapshots as authenticated data. Focus, selection, the scrolled viewport, render dirtiness, host callbacks, and Kitty image storage are not persisted. No native option caps total snapshot bytes or decoded terminal state, so callers must bound untrusted input before this operation. The public operations are one-shot and synchronous. Port callbacks, incremental READY/history restoration, progress, source offsets, and public decoder handles belong to a later facility.
+A buffer-based snapshot stores persistent terminal state as an unstable pinned-native binary record stream. Version 1 has no compatibility guarantee across Ghostty revisions. Each record has a CRC32C checksum for corruption detection, not authentication; callers must not treat untrusted snapshots as authenticated data. Focus, selection, the scrolled viewport, render dirtiness, host callbacks, and Kitty image storage are not persisted. No native option caps total snapshot bytes or decoded terminal state, so callers must bound untrusted input. The byte-string operations are synchronous, copied, one-shot forms; the port operations below expose the same format without exposing native callbacks.
 
 @defproc[(terminal->snapshot-bytes [terminal terminal?]) (and/c bytes? immutable?)]{Returns a complete immutable Racket-owned snapshot of @racket[terminal]. The operation serializes with every other call on that terminal. It requests a native allocation, copies its exact length, and always releases it through @tt{ghostty_free} with the matching default allocator.
 
@@ -114,6 +114,38 @@ A terminal at VT and UTF-8 ground can be encoded with continuation tracking disa
 The supplied byte string must end at FINISH. Truncated, malformed, unsupported-version, checksum-invalid, trailing, and concatenated input raises @racket[exn:fail:ghostty?] with result @racket['invalid-value]. An oversized continuation raises @racket['limit-exceeded], and allocation failure remains @racket['out-of-memory]. The decoder is transactional: failure returns no terminal. Private input storage and the decoder are always freed.
 
 The new terminal has a fresh Racket lock, render state, effect state, and empty handler roots. Host callbacks are not snapshot state and are not copied. Normal explicit and finalizer cleanup, closed-handle errors, serialization, and callback reentrancy rules apply. The restored parser may remain unfinished, but its continuation tracking policy is zero. It cannot be snapshotted again while unfinished; feed enough input to reach ground, then enable tracking before later input that may remain unfinished.}
+
+@subsection{Port-backed and Incremental Snapshots}
+
+Port-backed operations adapt caller-owned Racket ports to synchronous native callbacks. They never close or explicitly flush a port. Do not read an input port independently while its decoder may still consume it. Calls from a pre-existing atomic region or FFI callback are rejected because the bridge must temporarily leave Racket callback atomic mode for blocking port access. Same-terminal and same-decoder callback reentry fails immediately; cross-object callback lock attempts never wait.
+
+A successful FINISH leaves transport bytes after the snapshot unread. A failed or interrupted custom port may already have consumed or emitted an unusable prefix. A raised Racket value, including a break, is contained inside the callback, native cleanup completes, and the initiating operation re-raises the identical first value. These operations do not make unstable CRC32C snapshot data authenticated or bounded; callers must impose external byte and resource limits on hostile sources.
+
+@defproc[(terminal-write-snapshot! [terminal terminal?] [output output-port?]) exact-nonnegative-integer?]{Writes one complete snapshot at @racket[output]'s current position and returns the number of bytes accepted by the port. Every borrowed native slice is copied before the port sees it, and short writes are retried in order. The operation serializes with every other use of @racket[terminal]. On failure the destination may contain a partial stream without FINISH and cannot be resumed.}
+
+@defproc[(snapshot-port->terminal [input input-port?] [#:max-continuation-bytes max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615)) #f]) terminal?]{Transactionally reads through FINISH and returns a fresh owned terminal. @racket[#f] keeps the pinned native continuation limit; an integer replaces it before decoding. Unlike @racket[snapshot-bytes->terminal], this operation stops at FINISH instead of rejecting trailing transport bytes. Failure publishes no terminal.}
+
+@defproc[(snapshot-decoder? [value any/c]) boolean?]{Reports whether @racket[value] is an incremental snapshot decoder handle.}
+
+@defproc[(make-snapshot-decoder [input input-port?] [#:max-continuation-bytes max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615)) #f]) snapshot-decoder?]{Creates an owned callback-backed decoder without consuming input. The decoder roots @racket[input] and its private callback through FINISH, consuming failure, explicit close, or finalization. The port remains caller-owned.}
+
+@defproc[(snapshot-decoder-closed? [decoder snapshot-decoder?]) boolean?]{Reports whether @racket[decoder] has been closed explicitly or by a consuming decoding failure.}
+
+@defproc[(snapshot-decoder-close! [decoder snapshot-decoder?]) void?]{Idempotently frees the native decoder and abandons any remaining history. A terminal already returned by READY remains open and usable.}
+
+@defproc[(snapshot-decoder-ready! [decoder snapshot-decoder?]) terminal?]{Consumes and validates the renderable prefix through READY exactly once. The returned caller-owned terminal can be rendered, resized, reset, or fed live input between later calls to @racket[snapshot-decoder-next!]. The decoder borrows its native handle until FINISH or decoder cleanup, so @racket[terminal-close!] rejects while attached. A consuming failure closes the decoder and publishes no terminal.}
+
+@defstruct*[snapshot-history ([primary-rows (integer-in 0 18446744073709551615)] [alternate-rows (or/c #f (integer-in 0 18446744073709551615))])]{Copied advisory complete logical history extents available after READY. @racket[#f] means the snapshot declares no alternate screen. The value remains stable after later decoding and cleanup.}
+
+@defproc[(snapshot-decoder-history [decoder snapshot-decoder?]) snapshot-history?]{Returns the copied history metadata cached at READY. Calling before READY is a lifecycle error.}
+
+@defproc[(snapshot-decoder-source-offset [decoder snapshot-decoder?]) (integer-in 0 18446744073709551615)]{Returns the number of source bytes successfully supplied to the native decoder. At FINISH this is the snapshot length and identifies the first trailing byte. A consuming failure closes the decoder, making the offset unavailable.}
+
+@defstruct*[snapshot-progress ([screen (or/c 'primary 'alternate)] [rows (integer-in 0 18446744073709551615)] [remaining (integer-in 0 4294967295)])]{A copied result for one validated history page. Zero @racket[rows] means the page was consumed but could not be applied after terminal mutation. @racket[remaining] counts pages left in the same screen's current history sequence, not every page left in the snapshot.}
+
+@defproc[(snapshot-decoder-next! [decoder snapshot-decoder?]) (or/c #f snapshot-progress?)]{After READY, consumes and validates one history page and returns copied progress. FINISH returns @racket[#f], and repeated calls after FINISH continue to return @racket[#f]. NEXT holds the decoder lock and then the READY terminal lock while native history mutation and progress copying occur. A consuming failure closes the decoder but detaches and leaves the already published terminal usable.}
+
+Incremental decoding restores native terminal state only. It does not recreate host callbacks, PTYs, storage, sessions, or browser reconnect policy; the browser demonstration remains intentionally unchanged.
 
 @subsection{Terminal Effects}
 

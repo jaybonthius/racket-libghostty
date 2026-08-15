@@ -64,6 +64,28 @@
            (->* [bytes?]
                 [#:max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615))]
                 terminal?)]
+          [terminal-write-snapshot! (-> terminal? output-port? exact-nonnegative-integer?)]
+          [snapshot-port->terminal
+           (->* [input-port?]
+                [#:max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615))]
+                terminal?)]
+          [snapshot-decoder? (-> any/c boolean?)]
+          [make-snapshot-decoder
+           (->* [input-port?]
+                [#:max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615))]
+                snapshot-decoder?)]
+          [snapshot-decoder-closed? (-> snapshot-decoder? boolean?)]
+          [snapshot-decoder-close! (-> snapshot-decoder? void?)]
+          [snapshot-decoder-ready! (-> snapshot-decoder? terminal?)]
+          [snapshot-decoder-history (-> snapshot-decoder? snapshot-history?)]
+          [snapshot-decoder-source-offset (-> snapshot-decoder? (integer-in 0 18446744073709551615))]
+          [snapshot-decoder-next! (-> snapshot-decoder? (or/c #f snapshot-progress?))]
+          (struct snapshot-history
+                  ([primary-rows (integer-in 0 18446744073709551615)]
+                   [alternate-rows (or/c #f (integer-in 0 18446744073709551615))]))
+          (struct snapshot-progress
+                  ([screen (or/c 'primary 'alternate)] [rows (integer-in 0 18446744073709551615)]
+                                                       [remaining (integer-in 0 4294967295)]))
           [terminal->plain-text (-> terminal? string?)]
           [terminal-render-snapshot (-> terminal? render-snapshot?)]
           [terminal-set-pty-write-handler!

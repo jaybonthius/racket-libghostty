@@ -1,11 +1,13 @@
 #lang racket/base
 
 (require ffi/unsafe
+         ffi/unsafe/atomic
          "abi.rkt"
          "error.rkt"
          "ffi/common.rkt"
          "ffi/effects.rkt"
          "ffi/formatter.rkt"
+         "ffi/io.rkt"
          "ffi/render.rkt"
          "ffi/snapshot.rkt"
          "ffi/terminal.rkt"
@@ -25,6 +27,16 @@
          terminal-vt-ground?
          terminal->snapshot-bytes
          snapshot-bytes->terminal
+         terminal-write-snapshot!
+         snapshot-port->terminal
+         snapshot-decoder?
+         make-snapshot-decoder
+         snapshot-decoder-closed?
+         snapshot-decoder-close!
+         snapshot-decoder-ready!
+         snapshot-decoder-history
+         snapshot-decoder-source-offset
+         snapshot-decoder-next!
          terminal->plain-text
          terminal-render-snapshot
          terminal-set-pty-write-handler!
@@ -41,6 +53,8 @@
          terminal-set-progress-handler!
          terminal-set-unknown-sequence-handler!
          terminal-set-unknown-max-bytes!
+         (struct-out snapshot-history)
+         (struct-out snapshot-progress)
          (struct-out terminal-size)
          (struct-out clipboard-content)
          (struct-out clipboard-write)
@@ -49,8 +63,31 @@
          (struct-out unknown-sequence)
          call-with-terminal-pointer)
 
-(struct terminal (pointer lock render-state row-iterator row-cells effects-state effect-roots)
+(struct terminal
+        (pointer lock
+                 render-state
+                 row-iterator
+                 row-cells
+                 effects-state
+                 effect-roots
+                 snapshot-borrows
+                 finalizer-registered?)
   #:authentic)
+(struct snapshot-decoder
+        (pointer lock
+                 [state #:mutable]
+                 [reader-context #:mutable]
+                 [callback #:mutable]
+                 [callback-pointer #:mutable]
+                 [reader #:mutable]
+                 [terminal #:mutable]
+                 [borrow-token #:mutable]
+                 [cached-history #:mutable])
+  #:authentic)
+(struct snapshot-reader-context (port raised) #:authentic)
+(struct snapshot-writer-context (port raised accepted) #:authentic)
+(struct snapshot-history (primary-rows alternate-rows) #:transparent)
+(struct snapshot-progress (screen rows remaining) #:transparent)
 (struct terminal-size (rows columns cell-width cell-height) #:transparent)
 (struct clipboard-content (mime data) #:transparent)
 (struct clipboard-write (location contents) #:transparent)
@@ -61,6 +98,7 @@
 (struct terminal-operation (raised allocations) #:authentic)
 
 (define current-callback-terminal (make-parameter #f))
+(define current-callback-snapshot-decoder (make-parameter #f))
 (define current-terminal-operation (make-parameter #f))
 
 (define continuation-max-bytes-option 31)
@@ -68,11 +106,17 @@
 (define vt-ground-data 38)
 (define snapshot-decoder-max-continuation-bytes-option 0)
 (define snapshot-decoder-source-offset-data 2)
+(define snapshot-decoder-history-primary-data 3)
+(define snapshot-decoder-history-alternate-data 4)
+(define snapshot-decoder-progress-screen-data 5)
+(define snapshot-decoder-progress-rows-data 6)
+(define snapshot-decoder-progress-remaining-data 7)
+(define snapshot-reader-max-chunk-size 65536)
 
 (define (check-callback-reentrancy who value)
   (when (eq? value (current-callback-terminal))
     (raise-arguments-error who
-                           "same-terminal calls are not allowed from a terminal effect handler"
+                           "same-terminal calls are not allowed from a terminal callback"
                            "terminal"
                            value)))
 
@@ -86,10 +130,39 @@
                           (lambda ()
                             (raise-arguments-error
                              who
-                             "terminal lock is unavailable during a terminal effect handler"
+                             "terminal lock is unavailable during a terminal callback"
                              "terminal"
                              value)))]
     [else (call-with-semaphore (terminal-lock value) procedure)]))
+
+(define (check-port-operation-context who)
+  (when (in-atomic-mode?)
+    (raise-arguments-error who
+                           "port-backed snapshot operations are not allowed in atomic mode"
+                           "operation"
+                           who)))
+
+(define (check-snapshot-decoder-reentrancy who value)
+  (when (eq? value (current-callback-snapshot-decoder))
+    (raise-arguments-error who
+                           "same-decoder calls are not allowed from its reader callback"
+                           "snapshot-decoder"
+                           value)))
+
+(define (call-with-snapshot-decoder-lock who value procedure)
+  (define callback-decoder (current-callback-snapshot-decoder))
+  (cond
+    [callback-decoder
+     (check-snapshot-decoder-reentrancy who value)
+     (call-with-semaphore (snapshot-decoder-lock value)
+                          procedure
+                          (lambda ()
+                            (raise-arguments-error
+                             who
+                             "snapshot decoder lock is unavailable during a reader callback"
+                             "snapshot-decoder"
+                             value)))]
+    [else (call-with-semaphore (snapshot-decoder-lock value) procedure)]))
 
 (define (release-terminal! value)
   (parameterize-break #f
@@ -108,7 +181,17 @@
                              (void/reference-sink value)]
                             [else (loop)])))))
 
-(define (adopt-terminal-pointer who pointer owner [prepare void])
+(define (register-terminal-finalizer! value)
+  (unless (unbox (terminal-finalizer-registered? value))
+    (register-finalizer value release-terminal!)
+    (set-box! (terminal-finalizer-registered? value) #t)))
+
+(define (adopt-terminal-pointer who
+                                pointer
+                                owner
+                                [prepare void]
+                                #:borrow-token [borrow-token #f]
+                                #:before-release [before-release void])
   (define render-state-cell (malloc _pointer))
   (define row-iterator-cell (malloc _pointer))
   (define row-cells-cell (malloc _pointer))
@@ -146,6 +229,9 @@
      (check-ghostty-result who cells-result)
      (unless row-cells
        (error who "native row cells constructor returned a null handle"))
+     (define snapshot-borrows (make-hasheq))
+     (when borrow-token
+       (hash-set! snapshot-borrows borrow-token #t))
      (set! value
            (terminal (box pointer)
                      (make-semaphore 1)
@@ -153,9 +239,12 @@
                      row-iterator
                      row-cells
                      effects-state
-                     (make-hasheq)))
+                     (make-hasheq)
+                     snapshot-borrows
+                     (box #f)))
      (parameterize-break #f
-                         (register-finalizer value release-terminal!)
+                         (unless borrow-token
+                           (register-terminal-finalizer! value))
                          (unless (box-cas! owner 'adopter 'wrapper)
                            (error who "native terminal ownership transfer failed")))
      value)
@@ -163,6 +252,7 @@
      (parameterize-break
       #f
       (when (box-cas! owner 'adopter 'freed)
+        (before-release)
         (cond
           [value (release-terminal! value)]
           [else
@@ -224,7 +314,15 @@
   (not (unbox (terminal-pointer value))))
 
 (define (terminal-close! value)
-  (call-with-terminal-lock 'terminal-close! value (lambda () (release-terminal! value)))
+  (call-with-terminal-lock 'terminal-close!
+                           value
+                           (lambda ()
+                             (unless (zero? (hash-count (terminal-snapshot-borrows value)))
+                               (raise-arguments-error 'terminal-close!
+                                                      "terminal is in use by a snapshot decoder"
+                                                      "terminal"
+                                                      value))
+                             (release-terminal! value)))
   (void))
 
 (define (terminal-reset! value)
@@ -441,6 +539,496 @@
 (define (snapshot-bytes->terminal input #:max-continuation-bytes [max-continuation-bytes #f])
   (check-libghostty-abi!)
   (decode-snapshot input max-continuation-bytes))
+
+(define (record-snapshot-raise! raised value)
+  (unless (unbox raised)
+    (set-box! raised (raised-value value))))
+
+(define (call-in-snapshot-callback raised procedure)
+  (dynamic-wind end-atomic
+                (lambda ()
+                  (call-as-nonatomic
+                   (lambda ()
+                     (with-handlers ([(lambda (_value) #t) (lambda (value)
+                                                             (record-snapshot-raise! raised value)
+                                                             #f)])
+                       (parameterize-break #f (call-with-continuation-barrier procedure))))))
+                start-atomic))
+
+(define (write-snapshot-chunk context pointer length)
+  (define copied (make-bytes length))
+  (memcpy copied pointer length)
+  (let loop ([offset 0])
+    (cond
+      [(= offset length) #t]
+      [else
+       (define written
+         (write-bytes-avail/enable-break copied (snapshot-writer-context-port context) offset length))
+       (when (zero? written)
+         (raise-arguments-error 'terminal-write-snapshot!
+                                "output port made no progress"
+                                "output-port"
+                                (snapshot-writer-context-port context)))
+       (set-box! (snapshot-writer-context-accepted context)
+                 (+ (unbox (snapshot-writer-context-accepted context)) written))
+       (loop (+ offset written))])))
+
+(define (make-snapshot-writer-callback context)
+  (lambda (_userdata pointer length)
+    (call-in-snapshot-callback (snapshot-writer-context-raised context)
+                               (lambda () (write-snapshot-chunk context pointer length)))))
+
+(define (read-snapshot-chunk context buffer capacity output)
+  (define length (min capacity snapshot-reader-max-chunk-size))
+  (define scratch (make-bytes length))
+  (define read
+    (read-bytes-avail!/enable-break scratch (snapshot-reader-context-port context) 0 length))
+  (cond
+    [(or (eof-object? read) (and (exact-nonnegative-integer? read) (zero? read)))
+     (ptr-set! output _size 0)
+     #t]
+    [(procedure? read)
+     (raise-arguments-error 'snapshot-reader
+                            "input port special values are not snapshot bytes"
+                            "input-port"
+                            (snapshot-reader-context-port context))]
+    [else
+     (memcpy buffer scratch read)
+     (ptr-set! output _size read)
+     #t]))
+
+(define (make-snapshot-reader-callback context)
+  (lambda (_userdata buffer capacity output)
+    (call-in-snapshot-callback (snapshot-reader-context-raised context)
+                               (lambda () (read-snapshot-chunk context buffer capacity output)))))
+
+(define (terminal-write-snapshot! value output)
+  (check-port-operation-context 'terminal-write-snapshot!)
+  (check-libghostty-abi!)
+  (define context (snapshot-writer-context output (box #f) (box 0)))
+  (define callback (make-snapshot-writer-callback context))
+  (define callback-pointer (cast callback _GhosttyWriterFn _fpointer))
+  (define writer (make-GhosttyWriter callback-pointer #f))
+  (dynamic-wind void
+                (lambda ()
+                  (call-with-terminal-pointer
+                   'terminal-write-snapshot!
+                   value
+                   (lambda (pointer)
+                     (parameterize-break
+                      #f
+                      (set-box! (snapshot-writer-context-raised context) #f)
+                      (define result
+                        (parameterize ([current-callback-terminal value])
+                          (call-as-atomic (lambda () (ghostty-snapshot-encode pointer writer)))))
+                      (define callback-raised (unbox (snapshot-writer-context-raised context)))
+                      (cond
+                        [callback-raised (raise (raised-value-value callback-raised))]
+                        [else
+                         (check-ghostty-result 'terminal-write-snapshot! result)
+                         (unbox (snapshot-writer-context-accepted context))])))))
+                (lambda () (void/reference-sink output context callback callback-pointer writer))))
+
+(define (clear-snapshot-reader-roots! value)
+  (void/reference-sink (snapshot-decoder-callback value)
+                       (snapshot-decoder-callback-pointer value)
+                       (snapshot-decoder-reader value))
+  (set-snapshot-decoder-reader-context! value #f)
+  (set-snapshot-decoder-callback! value #f)
+  (set-snapshot-decoder-callback-pointer! value #f)
+  (set-snapshot-decoder-reader! value #f))
+
+(define (free-snapshot-decoder-native! value)
+  (define pointer-box (snapshot-decoder-pointer value))
+  (let loop ()
+    (define pointer (unbox pointer-box))
+    (when pointer
+      (cond
+        [(box-cas! pointer-box pointer #f)
+         (ghostty-snapshot-decoder-free pointer)
+         (void/reference-sink value)]
+        [else (loop)]))))
+
+(define (detach-snapshot-terminal/locked! value)
+  (define ready-terminal (snapshot-decoder-terminal value))
+  (when ready-terminal
+    (register-terminal-finalizer! ready-terminal)
+    (define borrow-token (snapshot-decoder-borrow-token value))
+    (when borrow-token
+      (hash-remove! (terminal-snapshot-borrows ready-terminal) borrow-token))
+    (set-snapshot-decoder-borrow-token! value #f)
+    (set-snapshot-decoder-terminal! value #f)))
+
+(define (close-snapshot-decoder/terminal-locked! value)
+  (free-snapshot-decoder-native! value)
+  (detach-snapshot-terminal/locked! value)
+  (clear-snapshot-reader-roots! value)
+  (set-snapshot-decoder-state! value 'closed))
+
+(define (close-snapshot-decoder/locked! who value)
+  (define ready-terminal (snapshot-decoder-terminal value))
+  (cond
+    [ready-terminal
+     (call-with-terminal-lock who
+                              ready-terminal
+                              (lambda () (close-snapshot-decoder/terminal-locked! value)))]
+    [else
+     (free-snapshot-decoder-native! value)
+     (clear-snapshot-reader-roots! value)
+     (set-snapshot-decoder-state! value 'closed)]))
+
+(define (finish-snapshot-decoder/terminal-locked! value)
+  (detach-snapshot-terminal/locked! value)
+  (clear-snapshot-reader-roots! value)
+  (set-snapshot-decoder-state! value 'finished))
+
+(define (release-snapshot-decoder! value)
+  (parameterize-break #f
+                      (call-with-semaphore
+                       (snapshot-decoder-lock value)
+                       (lambda ()
+                         (close-snapshot-decoder/locked! 'snapshot-decoder-finalizer value)))))
+
+(define (snapshot-decoder-native-pointer who value)
+  (define pointer (unbox (snapshot-decoder-pointer value)))
+  (unless pointer
+    (raise-ghostty-closed who 'snapshot-decoder))
+  pointer)
+
+(define (set-snapshot-decoder-limit! who pointer limit)
+  (when limit
+    (define native-limit (malloc _size 'atomic))
+    (ptr-set! native-limit _size limit)
+    (check-ghostty-result who
+                          (ghostty-snapshot-decoder-set pointer
+                                                        snapshot-decoder-max-continuation-bytes-option
+                                                        native-limit))))
+
+(define (make-snapshot-decoder input #:max-continuation-bytes [max-continuation-bytes #f])
+  (check-port-operation-context 'make-snapshot-decoder)
+  (check-libghostty-abi!)
+  (define context (snapshot-reader-context input (box #f)))
+  (define callback (make-snapshot-reader-callback context))
+  (define callback-pointer (cast callback _GhosttyReaderFn _fpointer))
+  (define reader (make-GhosttyReader callback-pointer #f))
+  (define decoder-cell (malloc _pointer))
+  (ptr-set! decoder-cell _pointer #f)
+  (define pointer #f)
+  (define value #f)
+  (define owner (box 'producer))
+  (dynamic-wind void
+                (lambda ()
+                  (parameterize-break
+                   #f
+                   (define result (ghostty-snapshot-decoder-new/into #f decoder-cell reader))
+                   (set! pointer (ghostty-snapshot-decoder-output-ref decoder-cell))
+                   (check-ghostty-result 'make-snapshot-decoder result)
+                   (unless pointer
+                     (error 'make-snapshot-decoder "native decoder returned a null handle"))
+                   (set-snapshot-decoder-limit! 'make-snapshot-decoder pointer max-continuation-bytes)
+                   (set! value
+                         (snapshot-decoder (box pointer)
+                                           (make-semaphore 1)
+                                           'configuring
+                                           context
+                                           callback
+                                           callback-pointer
+                                           reader
+                                           #f
+                                           #f
+                                           #f))
+                   (register-finalizer value release-snapshot-decoder!)
+                   (unless (box-cas! owner 'producer 'wrapper)
+                     (error 'make-snapshot-decoder "native decoder ownership transfer failed"))
+                   value))
+                (lambda ()
+                  (parameterize-break
+                   #f
+                   (when (box-cas! owner 'producer 'freed)
+                     (define owned-pointer
+                       (or pointer (ghostty-snapshot-decoder-output-ref decoder-cell)))
+                     (when owned-pointer
+                       (ghostty-snapshot-decoder-free owned-pointer)))
+                   (void/reference-sink input context callback callback-pointer reader value)))))
+
+(define (snapshot-decoder-closed? value)
+  (check-port-operation-context 'snapshot-decoder-closed?)
+  (check-snapshot-decoder-reentrancy 'snapshot-decoder-closed? value)
+  (eq? (snapshot-decoder-state value) 'closed))
+
+(define (snapshot-decoder-close! value)
+  (check-port-operation-context 'snapshot-decoder-close!)
+  (call-with-snapshot-decoder-lock
+   'snapshot-decoder-close!
+   value
+   (lambda ()
+     (parameterize-break #f (close-snapshot-decoder/locked! 'snapshot-decoder-close! value))))
+  (void))
+
+(define (call-snapshot-reader-native value callback-terminal procedure)
+  (define context (snapshot-decoder-reader-context value))
+  (unless context
+    (error 'snapshot-decoder "reader roots are unavailable before FINISH"))
+  (set-box! (snapshot-reader-context-raised context) #f)
+  (define result
+    (parameterize ([current-callback-snapshot-decoder value]
+                   [current-callback-terminal callback-terminal])
+      (call-as-atomic procedure)))
+  (values result (unbox (snapshot-reader-context-raised context))))
+
+(define (copy-snapshot-history who pointer)
+  (define primary (malloc _uint64 'atomic))
+  (define alternate (malloc _uint64 'atomic))
+  (ptr-set! primary _uint64 0)
+  (ptr-set! alternate _uint64 0)
+  (check-ghostty-result
+   who
+   (ghostty-snapshot-decoder-get pointer snapshot-decoder-history-primary-data primary))
+  (define alternate-result
+    (ghostty-snapshot-decoder-get pointer snapshot-decoder-history-alternate-data alternate))
+  (cond
+    [(= alternate-result GHOSTTY-SUCCESS)
+     (snapshot-history (ptr-ref primary _uint64) (ptr-ref alternate _uint64))]
+    [(= alternate-result GHOSTTY-NO-VALUE) (snapshot-history (ptr-ref primary _uint64) #f)]
+    [else
+     (check-ghostty-result who alternate-result)
+     (error who "unreachable")]))
+
+(define (snapshot-decoder-ready! value)
+  (check-port-operation-context 'snapshot-decoder-ready!)
+  (call-with-snapshot-decoder-lock
+   'snapshot-decoder-ready!
+   value
+   (lambda ()
+     (case (snapshot-decoder-state value)
+       [(closed) (raise-ghostty-closed 'snapshot-decoder-ready! 'snapshot-decoder)]
+       [(ready finished)
+        (raise-arguments-error 'snapshot-decoder-ready!
+                               "decoder has already passed READY"
+                               "snapshot-decoder"
+                               value)]
+       [else
+        (define pointer (snapshot-decoder-native-pointer 'snapshot-decoder-ready! value))
+        (define terminal-cell #f)
+        (define decoded #f)
+        (define adopted #f)
+        (define committed? #f)
+        (define owner (box 'producer))
+        (dynamic-wind
+         void
+         (lambda ()
+           (parameterize-break
+            #f
+            (set! terminal-cell (malloc _pointer 'raw))
+            (ptr-set! terminal-cell _pointer #f)
+            (define-values (result callback-raised)
+              (call-snapshot-reader-native
+               value
+               #f
+               (lambda () (ghostty-snapshot-decoder-ready/into pointer terminal-cell))))
+            (set! decoded (ghostty-terminal-output-ref terminal-cell))
+            (when callback-raised
+              (raise (raised-value-value callback-raised)))
+            (check-ghostty-result 'snapshot-decoder-ready! result)
+            (unless decoded
+              (error 'snapshot-decoder-ready! "native decoder returned a null terminal"))
+            (define history (copy-snapshot-history 'snapshot-decoder-ready! pointer))
+            (define borrow-token (box #t))
+            (set! adopted
+                  (adopt-terminal-pointer
+                   'snapshot-decoder-ready!
+                   decoded
+                   owner
+                   void
+                   #:borrow-token borrow-token
+                   #:before-release
+                   (lambda () (close-snapshot-decoder/locked! 'snapshot-decoder-ready! value))))
+            (set-snapshot-decoder-terminal! value adopted)
+            (set-snapshot-decoder-borrow-token! value borrow-token)
+            (set-snapshot-decoder-cached-history! value history)
+            (set-snapshot-decoder-state! value 'ready)
+            (set! committed? #t)
+            adopted))
+         (lambda ()
+           (parameterize-break #f
+                               (unless committed?
+                                 (close-snapshot-decoder/locked! 'snapshot-decoder-ready! value)
+                                 (when (box-cas! owner 'producer 'freed)
+                                   (define owned-terminal
+                                     (and terminal-cell
+                                          (or decoded (ghostty-terminal-output-ref terminal-cell))))
+                                   (when owned-terminal
+                                     (ghostty-terminal-free owned-terminal)))
+                                 (when (and adopted (eq? (unbox owner) 'wrapper))
+                                   (release-terminal! adopted)))
+                               (when terminal-cell
+                                 (free terminal-cell)))))]))))
+
+(define (snapshot-decoder-history value)
+  (check-port-operation-context 'snapshot-decoder-history)
+  (call-with-snapshot-decoder-lock
+   'snapshot-decoder-history
+   value
+   (lambda ()
+     (case (snapshot-decoder-state value)
+       [(closed) (raise-ghostty-closed 'snapshot-decoder-history 'snapshot-decoder)]
+       [(configuring)
+        (raise-arguments-error 'snapshot-decoder-history
+                               "history is unavailable before READY"
+                               "snapshot-decoder"
+                               value)]
+       [else (snapshot-decoder-cached-history value)]))))
+
+(define (snapshot-decoder-source-offset value)
+  (check-port-operation-context 'snapshot-decoder-source-offset)
+  (call-with-snapshot-decoder-lock
+   'snapshot-decoder-source-offset
+   value
+   (lambda ()
+     (define pointer (snapshot-decoder-native-pointer 'snapshot-decoder-source-offset value))
+     (define output (malloc _size 'atomic))
+     (ptr-set! output _size 0)
+     (check-ghostty-result
+      'snapshot-decoder-source-offset
+      (ghostty-snapshot-decoder-get pointer snapshot-decoder-source-offset-data output))
+     (ptr-ref output _size))))
+
+(define (copy-snapshot-progress who pointer)
+  (define screen (malloc _int 'atomic))
+  (define rows (malloc _size 'atomic))
+  (define remaining (malloc _uint32 'atomic))
+  (define keys (malloc _int 3 'atomic))
+  (define outputs (malloc _pointer 3 'atomic))
+  (define written (malloc _size 'atomic))
+  (ptr-set! screen _int 0)
+  (ptr-set! rows _size 0)
+  (ptr-set! remaining _uint32 0)
+  (ptr-set! keys _int 0 snapshot-decoder-progress-screen-data)
+  (ptr-set! keys _int 1 snapshot-decoder-progress-rows-data)
+  (ptr-set! keys _int 2 snapshot-decoder-progress-remaining-data)
+  (ptr-set! outputs _pointer 0 screen)
+  (ptr-set! outputs _pointer 1 rows)
+  (ptr-set! outputs _pointer 2 remaining)
+  (ptr-set! written _size 0)
+  (check-ghostty-result who (ghostty-snapshot-decoder-get-multi pointer 3 keys outputs written))
+  (unless (= (ptr-ref written _size) 3)
+    (error who "native decoder returned incomplete progress"))
+  (define screen-name
+    (case (ptr-ref screen _int)
+      [(0) 'primary]
+      [(1) 'alternate]
+      [else (error who "native decoder returned an invalid progress screen")]))
+  (snapshot-progress screen-name (ptr-ref rows _size) (ptr-ref remaining _uint32)))
+
+(define (snapshot-decoder-next! value)
+  (check-port-operation-context 'snapshot-decoder-next!)
+  (call-with-snapshot-decoder-lock
+   'snapshot-decoder-next!
+   value
+   (lambda ()
+     (case (snapshot-decoder-state value)
+       [(closed) (raise-ghostty-closed 'snapshot-decoder-next! 'snapshot-decoder)]
+       [(configuring)
+        (raise-arguments-error 'snapshot-decoder-next!
+                               "decoder has not reached READY"
+                               "snapshot-decoder"
+                               value)]
+       [(finished) #f]
+       [else
+        (define ready-terminal (snapshot-decoder-terminal value))
+        (unless ready-terminal
+          (error 'snapshot-decoder-next! "READY terminal is unavailable"))
+        (call-with-terminal-pointer
+         'snapshot-decoder-next!
+         ready-terminal
+         (lambda (_terminal-pointer)
+           (parameterize-break
+            #f
+            (define pointer (snapshot-decoder-native-pointer 'snapshot-decoder-next! value))
+            (define-values (result callback-raised)
+              (call-snapshot-reader-native value
+                                           ready-terminal
+                                           (lambda () (ghostty-snapshot-decoder-next pointer))))
+            (cond
+              [callback-raised
+               (close-snapshot-decoder/terminal-locked! value)
+               (raise (raised-value-value callback-raised))]
+              [(= result GHOSTTY-SUCCESS)
+               (with-handlers ([(lambda (_value) #t) (lambda (raised)
+                                                       (close-snapshot-decoder/terminal-locked! value)
+                                                       (raise raised))])
+                 (copy-snapshot-progress 'snapshot-decoder-next! pointer))]
+              [(= result GHOSTTY-NO-VALUE)
+               (finish-snapshot-decoder/terminal-locked! value)
+               #f]
+              [else
+               (close-snapshot-decoder/terminal-locked! value)
+               (check-ghostty-result 'snapshot-decoder-next! result)
+               (error 'snapshot-decoder-next! "unreachable")]))))]))))
+
+(define (decode-snapshot-port/locked value)
+  (define pointer (snapshot-decoder-native-pointer 'snapshot-port->terminal value))
+  (unless (eq? (snapshot-decoder-state value) 'configuring)
+    (raise-arguments-error 'snapshot-port->terminal
+                           "decoder has already consumed input"
+                           "snapshot-decoder"
+                           value))
+  (define terminal-cell #f)
+  (define decoded #f)
+  (define adopted #f)
+  (define committed? #f)
+  (define owner (box 'producer))
+  (dynamic-wind void
+                (lambda ()
+                  (parameterize-break
+                   #f
+                   (set! terminal-cell (malloc _pointer 'raw))
+                   (ptr-set! terminal-cell _pointer #f)
+                   (define-values (result callback-raised)
+                     (call-snapshot-reader-native
+                      value
+                      #f
+                      (lambda () (ghostty-snapshot-decoder-decode/into pointer terminal-cell))))
+                   (set! decoded (ghostty-terminal-output-ref terminal-cell))
+                   (when callback-raised
+                     (raise (raised-value-value callback-raised)))
+                   (check-ghostty-result 'snapshot-port->terminal result)
+                   (unless decoded
+                     (error 'snapshot-port->terminal "native decoder returned a null terminal"))
+                   (close-snapshot-decoder/locked! 'snapshot-port->terminal value)
+                   (set! adopted (adopt-terminal-pointer 'snapshot-port->terminal decoded owner))
+                   (set! committed? #t)
+                   adopted))
+                (lambda ()
+                  (parameterize-break
+                   #f
+                   (unless committed?
+                     (close-snapshot-decoder/locked! 'snapshot-port->terminal value)
+                     (when (box-cas! owner 'producer 'freed)
+                       (define owned-terminal
+                         (and terminal-cell (or decoded (ghostty-terminal-output-ref terminal-cell))))
+                       (when owned-terminal
+                         (ghostty-terminal-free owned-terminal))))
+                   (when terminal-cell
+                     (free terminal-cell))))))
+
+(define (snapshot-port->terminal input #:max-continuation-bytes [max-continuation-bytes #f])
+  (check-port-operation-context 'snapshot-port->terminal)
+  (define decoder #f)
+  (dynamic-wind
+   void
+   (lambda ()
+     (set! decoder (make-snapshot-decoder input #:max-continuation-bytes max-continuation-bytes))
+     (call-with-snapshot-decoder-lock 'snapshot-port->terminal
+                                      decoder
+                                      (lambda () (decode-snapshot-port/locked decoder))))
+   (lambda ()
+     (when decoder
+       (parameterize-break #f
+                           (call-with-semaphore
+                            (snapshot-decoder-lock decoder)
+                            (lambda ()
+                              (close-snapshot-decoder/locked! 'snapshot-port->terminal decoder))))))))
 
 (define (copy-effect-bytes pointer length)
   (define output (make-bytes length))
