@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require libghostty
+         racket/async-channel
          rackunit)
 
 (define (call-with-terminal procedure
@@ -323,21 +324,51 @@
     (terminal-write! source (string->bytes/utf-8 (format "break-~a Ω\r\n" line))))
   (define encoded (terminal->snapshot-bytes source))
   (terminal-close! source)
-  (define (break-operation procedure)
+  (define (break-path label procedure)
+    (define ready (make-semaphore 0))
+    (define outcome (make-async-channel))
+    (define terminal #f)
     (define worker
       (thread (lambda ()
-                (with-handlers ([exn:break? (lambda (_error) (void))])
-                  (define terminal (procedure))
-                  (dynamic-wind void
-                                (lambda () (terminal->plain-text terminal))
-                                (lambda () (terminal-close! terminal)))))))
-    (sleep 0)
-    (break-thread worker)
-    (unless (sync/timeout 20 worker)
-      (error 'snapshot-break-test "worker timed out")))
-  (for ([_iteration (in-range 20)])
-    (break-operation (lambda () (make-terminal 20 3)))
-    (break-operation (lambda () (snapshot-bytes->terminal encoded))))
+                (with-handlers
+                    ([exn:break? (lambda (_error)
+                                   (parameterize-break #f (async-channel-put outcome (list 'break))))]
+                     [(lambda (_value) #t)
+                      (lambda (raised)
+                        (parameterize-break #f (async-channel-put outcome (list 'raised raised))))])
+                  (semaphore-post ready)
+                  (let loop ()
+                    (dynamic-wind void
+                                  (lambda ()
+                                    (set! terminal (procedure))
+                                    (terminal->plain-text terminal))
+                                  (lambda ()
+                                    (parameterize-break #f
+                                                        (when terminal
+                                                          (terminal-close! terminal)
+                                                          (set! terminal #f)))))
+                    (loop))))))
+    (semaphore-wait ready)
+    (let loop ([remaining 200])
+      (define reported (sync/timeout 0 outcome))
+      (cond
+        [reported
+         (unless (sync/timeout 20 worker)
+           (error 'snapshot-break-test "~a worker did not exit after reporting" label))
+         (case (car reported)
+           [(break) (void)]
+           [(raised) (raise (cadr reported))])]
+        [(thread-dead? worker)
+         (error 'snapshot-break-test "~a worker exited without reporting" label)]
+        [(zero? remaining)
+         (kill-thread worker)
+         (error 'snapshot-break-test "~a worker ignored bounded interruption" label)]
+        [else
+         (break-thread worker)
+         (sleep 0.001)
+         (loop (sub1 remaining))])))
+  (break-path 'constructor (lambda () (make-terminal 20 3)))
+  (break-path 'restore (lambda () (snapshot-bytes->terminal encoded)))
   (collect-garbage)
   (collect-garbage)
   (for ([_iteration (in-range 20)])

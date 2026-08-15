@@ -109,6 +109,12 @@
                             [else (loop)])))))
 
 (define (adopt-terminal-pointer who pointer owner [prepare void])
+  (define render-state-cell (malloc _pointer))
+  (define row-iterator-cell (malloc _pointer))
+  (define row-cells-cell (malloc _pointer))
+  (ptr-set! render-state-cell _pointer #f)
+  (ptr-set! row-iterator-cell _pointer #f)
+  (ptr-set! row-cells-cell _pointer #f)
   (define render-state #f)
   (define row-iterator #f)
   (define row-cells #f)
@@ -121,19 +127,25 @@
                          (unless (box-cas! owner 'producer 'adopter)
                            (error who "native terminal ownership is unavailable")))
      (prepare pointer)
-     (set! effects-state (ghostty-racket-terminal-effects-new))
+     (parameterize-break #f (set! effects-state (ghostty-racket-terminal-effects-new)))
      (unless effects-state
        (error who "could not allocate terminal effect state"))
      (check-ghostty-result who (ghostty-racket-terminal-effects-attach pointer effects-state))
-     (define-values (state-result new-state) (ghostty-render-state-new))
-     (set! render-state new-state)
+     (define state-result (ghostty-render-state-new/into #f render-state-cell))
+     (set! render-state (ghostty-render-state-output-ref render-state-cell))
      (check-ghostty-result who state-result)
-     (define-values (row-result new-row-iterator) (ghostty-render-state-row-iterator-new))
-     (set! row-iterator new-row-iterator)
+     (unless render-state
+       (error who "native render state constructor returned a null handle"))
+     (define row-result (ghostty-render-state-row-iterator-new/into #f row-iterator-cell))
+     (set! row-iterator (ghostty-render-state-row-iterator-output-ref row-iterator-cell))
      (check-ghostty-result who row-result)
-     (define-values (cells-result new-row-cells) (ghostty-render-state-row-cells-new))
-     (set! row-cells new-row-cells)
+     (unless row-iterator
+       (error who "native row iterator constructor returned a null handle"))
+     (define cells-result (ghostty-render-state-row-cells-new/into #f row-cells-cell))
+     (set! row-cells (ghostty-render-state-row-cells-output-ref row-cells-cell))
      (check-ghostty-result who cells-result)
+     (unless row-cells
+       (error who "native row cells constructor returned a null handle"))
      (set! value
            (terminal (box pointer)
                      (make-semaphore 1)
@@ -148,20 +160,27 @@
                            (error who "native terminal ownership transfer failed")))
      value)
    (lambda ()
-     (parameterize-break #f
-                         (when (box-cas! owner 'adopter 'freed)
-                           (cond
-                             [value (release-terminal! value)]
-                             [else
-                              (when row-cells
-                                (ghostty-render-state-row-cells-free row-cells))
-                              (when row-iterator
-                                (ghostty-render-state-row-iterator-free row-iterator))
-                              (when render-state
-                                (ghostty-render-state-free render-state))
-                              (ghostty-terminal-free pointer)
-                              (when effects-state
-                                (ghostty-racket-terminal-effects-free effects-state))]))))))
+     (parameterize-break
+      #f
+      (when (box-cas! owner 'adopter 'freed)
+        (cond
+          [value (release-terminal! value)]
+          [else
+           (define owned-row-cells
+             (or row-cells (ghostty-render-state-row-cells-output-ref row-cells-cell)))
+           (define owned-row-iterator
+             (or row-iterator (ghostty-render-state-row-iterator-output-ref row-iterator-cell)))
+           (define owned-render-state
+             (or render-state (ghostty-render-state-output-ref render-state-cell)))
+           (when owned-row-cells
+             (ghostty-render-state-row-cells-free owned-row-cells))
+           (when owned-row-iterator
+             (ghostty-render-state-row-iterator-free owned-row-iterator))
+           (when owned-render-state
+             (ghostty-render-state-free owned-render-state))
+           (ghostty-terminal-free pointer)
+           (when effects-state
+             (ghostty-racket-terminal-effects-free effects-state))]))))))
 
 (define (make-terminal columns rows #:continuation-max-bytes [continuation-max-bytes 0])
   (check-libghostty-abi!)

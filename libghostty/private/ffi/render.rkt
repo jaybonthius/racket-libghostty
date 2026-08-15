@@ -12,7 +12,8 @@
          _GhosttyRenderState
          _GhosttyRenderStateRowIterator
          _GhosttyRenderStateRowCells
-         ghostty-render-state-new
+         ghostty-render-state-new/into
+         ghostty-render-state-output-ref
          ghostty-render-state-free
          ghostty-render-state-update
          ghostty-render-state-begin-update
@@ -21,13 +22,15 @@
          ghostty-render-state-get-multi
          ghostty-render-state-set
          ghostty-render-state-colors-get
-         ghostty-render-state-row-iterator-new
+         ghostty-render-state-row-iterator-new/into
+         ghostty-render-state-row-iterator-output-ref
          ghostty-render-state-row-iterator-free
          ghostty-render-state-row-iterator-next
          ghostty-render-state-row-get
          ghostty-render-state-row-get-multi
          ghostty-render-state-row-set
-         ghostty-render-state-row-cells-new
+         ghostty-render-state-row-cells-new/into
+         ghostty-render-state-row-cells-output-ref
          ghostty-render-state-row-cells-next
          ghostty-render-state-row-cells-select
          ghostty-render-state-row-cells-get
@@ -46,20 +49,17 @@
                               [cursor-has-value _stdbool]
                               [palette (_array _GhosttyColorRgb 256)]))
 
-(define (make-owned-handle raw tag)
-  (define output (malloc _pointer))
-  (ptr-set! output _pointer #f)
-  (define result (raw #f output))
+(define (owned-handle-output-ref output tag)
   (define pointer (ptr-ref output _pointer))
   (when pointer
     (cpointer-push-tag! pointer tag))
-  (values result pointer))
+  pointer)
 
-(define-ghostty ghostty-render-state-new/raw
+(define-ghostty ghostty-render-state-new/into
                 (_fun _pointer _pointer -> _int)
                 #:c-id ghostty_render_state_new)
-(define (ghostty-render-state-new)
-  (make-owned-handle ghostty-render-state-new/raw 'GhosttyRenderState))
+(define (ghostty-render-state-output-ref output)
+  (owned-handle-output-ref output 'GhosttyRenderState))
 (define-ghostty ghostty-render-state-free
                 (_fun _GhosttyRenderState -> _void)
                 #:c-id ghostty_render_state_free)
@@ -85,11 +85,11 @@
                 (_fun _GhosttyRenderState _pointer -> _int)
                 #:c-id ghostty_render_state_colors_get)
 
-(define-ghostty ghostty-render-state-row-iterator-new/raw
+(define-ghostty ghostty-render-state-row-iterator-new/into
                 (_fun _pointer _pointer -> _int)
                 #:c-id ghostty_render_state_row_iterator_new)
-(define (ghostty-render-state-row-iterator-new)
-  (make-owned-handle ghostty-render-state-row-iterator-new/raw 'GhosttyRenderStateRowIterator))
+(define (ghostty-render-state-row-iterator-output-ref output)
+  (owned-handle-output-ref output 'GhosttyRenderStateRowIterator))
 (define-ghostty ghostty-render-state-row-iterator-free
                 (_fun _GhosttyRenderStateRowIterator -> _void)
                 #:c-id ghostty_render_state_row_iterator_free)
@@ -106,11 +106,11 @@
                 (_fun _GhosttyRenderStateRowIterator _int _pointer -> _int)
                 #:c-id ghostty_render_state_row_set)
 
-(define-ghostty ghostty-render-state-row-cells-new/raw
+(define-ghostty ghostty-render-state-row-cells-new/into
                 (_fun _pointer _pointer -> _int)
                 #:c-id ghostty_render_state_row_cells_new)
-(define (ghostty-render-state-row-cells-new)
-  (make-owned-handle ghostty-render-state-row-cells-new/raw 'GhosttyRenderStateRowCells))
+(define (ghostty-render-state-row-cells-output-ref output)
+  (owned-handle-output-ref output 'GhosttyRenderStateRowCells))
 (define-ghostty ghostty-render-state-row-cells-next
                 (_fun _GhosttyRenderStateRowCells -> _stdbool)
                 #:c-id ghostty_render_state_row_cells_next)
