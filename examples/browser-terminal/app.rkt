@@ -17,12 +17,16 @@
          browser-session-snapshot
          browser-session-wait
          browser-session-close!
+         render-snapshot-xexpr
          make-browser-terminal-app
          serve-browser-terminal)
 
 (define terminal-columns 80)
 (define terminal-rows 24)
 (define workflow-marker "PTY_WORKFLOW_OK 界 é 👩‍💻")
+
+(define terminal-stylesheet
+  ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap}.terminal-row{display:block;block-size:1lh;line-height:1}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:1ch;min-inline-size:1ch;block-size:1lh;line-height:1;overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:2ch;min-inline-size:2ch}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}")
 
 (struct browser-session (terminal process master changes done error close-lock closed? finished?)
   #:authentic)
@@ -177,16 +181,24 @@
                                   (format "text-decoration-line:~a" (string-join decorations " ")))))
                ";"))
 
-(define (cell-xexpr cell colors cursor)
+(define (cursor-cell-x cursor y)
   (define viewport (render-cursor-viewport cursor))
-  (define cursor-cell?
-    (and (render-cursor-visible? cursor)
-         viewport
-         (= (render-cell-x cell) (render-viewport-x viewport))
-         (= (render-cell-y cell) (render-viewport-y viewport))))
+  (and (render-cursor-visible? cursor)
+       viewport
+       (= y (render-viewport-y viewport))
+       (if (and (render-viewport-wide-tail? viewport) (positive? (render-viewport-x viewport)))
+           (sub1 (render-viewport-x viewport))
+           (render-viewport-x viewport))))
+
+(define (cell-xexpr cell colors cursor)
+  (define target-x (cursor-cell-x cursor (render-cell-y cell)))
+  (define cursor-cell? (and target-x (= (render-cell-x cell) target-x)))
+  (define placeholder?
+    (or (string=? (render-cell-grapheme cell) "") (eq? (render-cell-wide cell) 'spacer-head)))
   (define classes
     (string-join (filter values
                          (list "terminal-cell"
+                               (and placeholder? "placeholder")
                                (and (render-cell-selected? cell) "selected")
                                (and cursor-cell? "cursor")
                                (symbol->string (render-cell-wide cell))))
@@ -196,8 +208,8 @@
                            (data-width ,(number->string (render-cell-width cell)))
                            (data-graphemes ,(number->string (render-cell-grapheme-count cell)))
                            (style ,(cell-style-css cell colors)))
-         ,(if (eq? (render-cell-wide cell) 'spacer-head)
-              ""
+         ,(if placeholder?
+              " "
               (render-cell-grapheme cell))))
 
 (define (row-xexpr row colors cursor)
@@ -206,8 +218,7 @@
                      #:unless (eq? (render-cell-wide cell) 'spacer-tail))
             (cell-xexpr cell colors cursor))))
 
-(define (terminal-xexpr session)
-  (define snapshot (browser-session-snapshot session))
+(define (render-snapshot-xexpr snapshot)
   (define colors (render-snapshot-colors snapshot))
   (define cursor (render-snapshot-cursor snapshot))
   (define viewport (render-cursor-viewport cursor))
@@ -230,10 +241,14 @@
                  ,@(for/list ([row (in-vector (render-snapshot-row-data snapshot))])
                      (row-xexpr row colors cursor)))))
 
+(define (terminal-xexpr session)
+  (render-snapshot-xexpr (browser-session-snapshot session)))
+
 (define (page-xexpr session)
   `(html (head (meta ((charset "utf-8")))
                (meta ((name "viewport") (content "width=device-width, initial-scale=1")))
                (title "libghostty browser terminal")
+               (style ,terminal-stylesheet)
                (script ((type "module") (src ,datastar-cdn-url))))
          (body (main (,(data-init (get "/events")))
                      (h1 "libghostty browser terminal")

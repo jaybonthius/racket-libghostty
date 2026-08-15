@@ -6,7 +6,6 @@
          "ffi/common.rkt"
          "ffi/formatter.rkt"
          "ffi/render.rkt"
-         "ffi/selection-test.rkt"
          "ffi/terminal.rkt"
          "render.rkt")
 
@@ -18,8 +17,7 @@
          terminal-resize!
          terminal-write!
          terminal->plain-text
-         terminal-render-snapshot
-         terminal-test-select-all!)
+         terminal-render-snapshot)
 
 (struct terminal (pointer lock render-state row-iterator row-cells) #:authentic)
 
@@ -175,13 +173,42 @@
                                                                (terminal-row-iterator value)
                                                                (terminal-row-cells value)))))
 
-(define (terminal-test-select-all! value)
-  (call-with-terminal-pointer
-   'terminal-test-select-all!
-   value
-   (lambda (pointer)
-     (define selection (malloc _GhosttySelection 'atomic))
-     (ptr-set! selection _size 0 (ctype-sizeof _GhosttySelection))
-     (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-select-all pointer selection))
-     (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-set pointer 21 selection))))
-  (void))
+(module* test-support #f
+  (require "ffi/selection-test.rkt")
+
+  (define (layout-value layouts type part)
+    (hash-ref (hash-ref layouts type) part))
+
+  (define (field-offset layouts type field)
+    (hash-ref (hash-ref (layout-value layouts type 'fields) field) 'offset))
+
+  (define (check-selection-test-abi!)
+    (define layouts (libghostty-type-layouts))
+    (unless (and (= (ctype-sizeof _GhosttyGridRef) (layout-value layouts 'GhosttyGridRef 'size))
+                 (= (ctype-alignof _GhosttyGridRef) (layout-value layouts 'GhosttyGridRef 'align))
+                 (= (ctype-sizeof _GhosttySelection) (layout-value layouts 'GhosttySelection 'size))
+                 (= (ctype-alignof _GhosttySelection) (layout-value layouts 'GhosttySelection 'align))
+                 (= 0 (field-offset layouts 'GhosttyGridRef 'size))
+                 (= 8 (field-offset layouts 'GhosttyGridRef 'node))
+                 (= 16 (field-offset layouts 'GhosttyGridRef 'x))
+                 (= 18 (field-offset layouts 'GhosttyGridRef 'y))
+                 (= 0 (field-offset layouts 'GhosttySelection 'size))
+                 (= 8 (field-offset layouts 'GhosttySelection 'start))
+                 (= 32 (field-offset layouts 'GhosttySelection 'end))
+                 (= 56 (field-offset layouts 'GhosttySelection 'rectangle)))
+      (error 'terminal-test-select-all! "selection test-support ABI mismatch")))
+
+  (define (terminal-test-select-all! value)
+    (check-selection-test-abi!)
+    (call-with-terminal-pointer
+     'terminal-test-select-all!
+     value
+     (lambda (pointer)
+       (define selection (malloc _GhosttySelection 'atomic))
+       (ptr-set! selection _size 0 (ctype-sizeof _GhosttySelection))
+       (check-ghostty-result 'terminal-test-select-all!
+                             (ghostty-terminal-select-all pointer selection))
+       (check-ghostty-result 'terminal-test-select-all! (ghostty-terminal-set pointer 21 selection))))
+    (void))
+
+  (provide terminal-test-select-all!))

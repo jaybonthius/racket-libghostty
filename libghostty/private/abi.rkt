@@ -8,7 +8,6 @@
          "ffi/device.rkt"
          "ffi/formatter.rkt"
          "ffi/render.rkt"
-         "ffi/selection-test.rkt"
          "ffi/sgr.rkt"
          "ffi/style.rkt")
 
@@ -105,16 +104,7 @@
                (cons 'invisible _stdbool)
                (cons 'strikethrough _stdbool)
                (cons 'overline _stdbool)
-               (cons 'underline _int)))
-   (list 'GhosttyGridRef
-         _GhosttyGridRef
-         (list (cons 'size _size) (cons 'node _pointer) (cons 'x _uint16) (cons 'y _uint16)))
-   (list 'GhosttySelection
-         _GhosttySelection
-         (list (cons 'size _size)
-               (cons 'start _GhosttyGridRef)
-               (cons 'end _GhosttyGridRef)
-               (cons 'rectangle _stdbool)))))
+               (cons 'underline _int)))))
 
 (define (align-offset offset alignment)
   (+ offset (modulo (- alignment (modulo offset alignment)) alignment)))

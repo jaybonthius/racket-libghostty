@@ -7,6 +7,7 @@
          racket/string
          racket/tcp
          rackunit
+         xml
          "../private/pty.rkt")
 
 (define (unused-port)
@@ -62,6 +63,71 @@
   (receive-with-timeout 'bounded-http-get ready timeout)
   (receive-with-timeout 'bounded-http-get result timeout))
 
+(define no-color (render-style-color 'none #f))
+(define default-style (render-style no-color no-color no-color #f #f #f #f #f #f #f #f 'none))
+(define test-colors
+  (render-colors (color-rgb 0 0 0) (color-rgb 240 240 240) #f (color-default-palette)))
+
+(define (test-cell x wide width grapheme #:background [background #f] #:selected? [selected? #f])
+  (render-cell x
+               0
+               0
+               grapheme
+               (if (string=? grapheme "") 0 1)
+               width
+               wide
+               'codepoint
+               (not (string=? grapheme ""))
+               #f
+               0
+               #f
+               #f
+               'output
+               #f
+               default-style
+               background
+               #f
+               selected?))
+
+(define test-row
+  (render-row 0
+              #t
+              #f
+              #f
+              #f
+              #t
+              #f
+              'none
+              #f
+              (render-selection-range 2 2)
+              (vector->immutable-vector
+               (vector (test-cell 0 'wide 2 "界")
+                       (test-cell 1 'spacer-tail 0 "")
+                       (test-cell 2 'narrow 1 "" #:background (color-rgb 1 2 3) #:selected? #t)
+                       (test-cell 3 'spacer-head 0 "ignored")))))
+
+(define (test-snapshot cursor-x wide-tail?)
+  (render-snapshot 4
+                   1
+                   'full
+                   test-colors
+                   (render-cursor 'block #t #f #f (render-viewport cursor-x 0 wide-tail?))
+                   (vector->immutable-vector (vector test-row))))
+
+(test-case "snapshot xexpr preserves cell geometry and wide-tail cursor policy"
+  (define wide-tail-html (xexpr->string (render-snapshot-xexpr (test-snapshot 1 #t))))
+  (check-true (string-contains? wide-tail-html "class=\"terminal-cell cursor wide\""))
+  (check-false (string-contains? wide-tail-html "data-x=\"1\""))
+  (check-true (string-contains? wide-tail-html "data-width=\"2\""))
+  (check-true (string-contains? wide-tail-html "class=\"terminal-cell placeholder selected narrow\""))
+  (check-true (string-contains? wide-tail-html "background-color:rgb(1 2 3)"))
+  (check-true (string-contains? wide-tail-html "class=\"terminal-cell placeholder spacer-head\""))
+  (check-true (string-contains? wide-tail-html "data-x=\"3\""))
+  (check-true (string-contains? wide-tail-html " "))
+  (define empty-cursor-html (xexpr->string (render-snapshot-xexpr (test-snapshot 2 #f))))
+  (check-true (string-contains? empty-cursor-html
+                                "class=\"terminal-cell placeholder selected cursor narrow\"")))
+
 (test-case "SSE receives a live PTY update after its initial snapshot"
   (define custodian (make-custodian))
   (define port (unused-port))
@@ -83,6 +149,13 @@
        (check-true (string-contains? page "ABI-described types"))
        (check-true (string-contains? page "Native grapheme width"))
        (check-true (regexp-match? #rx"Native grapheme width[^<]*</dt>[^<]*<dd>2</dd>" page))
+       (check-true (string-contains? page "font-family:ui-monospace"))
+       (check-true (string-contains? page ".terminal-row{display:block;block-size:1lh"))
+       (check-true (string-contains? page ".terminal-cell{display:inline-block"))
+       (check-true (string-contains? page "inline-size:1ch;min-inline-size:1ch;block-size:1lh"))
+       (check-true (string-contains? page ".terminal-cell.wide{inline-size:2ch"))
+       (check-true (string-contains? page ".terminal-cell.selected{background-image:"))
+       (check-true (string-contains? page ".terminal-cell.cursor{box-shadow:"))
        (browser-session-wait session 10)
        (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK 界 é 👩‍💻")
        (define snapshot (browser-session-snapshot session))

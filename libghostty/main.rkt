@@ -60,7 +60,7 @@
           (struct render-colors
                   ([background color-rgb?] [foreground color-rgb?]
                                            [cursor (or/c #f color-rgb?)]
-                                           [palette (and/c vector? immutable?)]))
+                                           [palette (and/c color-palette/c immutable?)]))
           (struct render-cursor
                   ([style (or/c 'bar 'block 'underline 'hollow-block)] [visible? boolean?]
                                                                        [blinking? boolean?]
@@ -87,7 +87,7 @@
                   ([x (integer-in 0 65535)]
                    [y (integer-in 0 65535)]
                    [codepoint (integer-in 0 4294967295)]
-                   [grapheme string?]
+                   [grapheme (and/c string? immutable?)]
                    [grapheme-count exact-nonnegative-integer?]
                    [width (integer-in 0 2)]
                    [wide (or/c 'narrow 'wide 'spacer-tail 'spacer-head)]

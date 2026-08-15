@@ -2,7 +2,7 @@
 
 (require libghostty
          rackunit
-         (prefix-in test: "../private/terminal.rkt"))
+         (prefix-in test: (submod "../private/terminal.rkt" test-support)))
 
 (define (call-with-terminal columns rows procedure)
   (define terminal (make-terminal columns rows))
@@ -297,6 +297,52 @@
      (for ([x (in-range 5)])
        (check-true (render-cell-selected? (snapshot-cell selected x))))
      (check-false (render-cell-selected? (snapshot-cell selected 5))))))
+
+(test-case "render snapshot constructors enforce documented copied invariants"
+  (call-with-terminal
+   4
+   1
+   (lambda (terminal)
+     (define snapshot (terminal-render-snapshot terminal))
+     (define colors (render-snapshot-colors snapshot))
+     (define (rebuild-colors palette)
+       (render-colors (render-colors-background colors)
+                      (render-colors-foreground colors)
+                      (render-colors-cursor colors)
+                      palette))
+     (check-exn exn:fail:contract? (lambda () (rebuild-colors (vector (color-rgb 0 0 0)))))
+     (check-exn exn:fail:contract? (lambda () (rebuild-colors (make-vector 256 (color-rgb 0 0 0)))))
+     (check-exn exn:fail:contract?
+                (lambda ()
+                  (rebuild-colors (vector->immutable-vector (make-vector 256 'not-a-color)))))
+     (define cell (snapshot-cell snapshot 0))
+     (define (rebuild-cell grapheme)
+       (render-cell (render-cell-x cell)
+                    (render-cell-y cell)
+                    (render-cell-codepoint cell)
+                    grapheme
+                    (render-cell-grapheme-count cell)
+                    (render-cell-width cell)
+                    (render-cell-wide cell)
+                    (render-cell-content cell)
+                    (render-cell-has-text? cell)
+                    (render-cell-has-styling? cell)
+                    (render-cell-style-id cell)
+                    (render-cell-hyperlink? cell)
+                    (render-cell-protected? cell)
+                    (render-cell-semantic-content cell)
+                    (render-cell-content-color cell)
+                    (render-cell-style cell)
+                    (render-cell-resolved-background cell)
+                    (render-cell-resolved-foreground cell)
+                    (render-cell-selected? cell)))
+     (check-exn exn:fail:contract? (lambda () (rebuild-cell (string-copy "mutable"))))
+     (check-not-exn (lambda () (rebuild-cell "immutable"))))))
+
+(test-case "selection mutation helper is available only from test support"
+  (check-exn exn:fail?
+             (lambda () (dynamic-require 'libghostty/private/terminal 'terminal-test-select-all!)))
+  (check-true (procedure? test:terminal-test-select-all!)))
 
 (test-case "render snapshots are immutable copies that survive mutation and close"
   (define terminal (make-terminal 8 2))
