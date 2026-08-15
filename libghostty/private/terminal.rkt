@@ -216,7 +216,13 @@
                                                    "terminal lock is unavailable during a callback"
                                                    "terminal"
                                                    value)))]
-    [else (call-with-semaphore (terminal-lock value) procedure)]))
+    [else
+     (define lock (terminal-lock value))
+     (when (current-kitty-graphics-test-hook)
+       (cond
+         [(semaphore-try-wait? lock) (semaphore-post lock)]
+         [else (run-kitty-graphics-test-hook 'terminal-lock-contended)]))
+     (call-with-semaphore lock procedure)]))
 
 (define (check-port-operation-context who)
   (when (in-atomic-mode?)

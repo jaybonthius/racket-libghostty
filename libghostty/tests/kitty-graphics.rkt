@@ -460,38 +460,77 @@
   (terminal-close! first)
   (terminal-close! second))
 
-(test-case "render races remain coherent across every terminal mutation"
+(test-case "render races contend and remain coherent across every terminal mutation"
   (for ([operation-name (in-list '(write resize storage reset close))])
     (define terminal (make-terminal 20 5 #:kitty-image-storage-limit 1000000))
     (terminal-write! terminal direct-rgb)
-    (define result (make-channel))
-    (thread (lambda ()
-              (with-handlers ([exn? (lambda (error) (channel-put result error))])
-                (for ([_iteration (in-range 100)])
-                  (define value (render-snapshot-kitty-graphics (terminal-render-snapshot terminal)))
-                  (unless (coherent-graphics? value)
-                    (error 'kitty-race "partial graphics snapshot during ~a" operation-name)))
-                (channel-put result 'completed))))
-    (with-handlers ([exn:fail:ghostty:closed? void])
+    (define render-entered (make-semaphore 0))
+    (define render-release (make-semaphore 0))
+    (define mutation-contended (make-semaphore 0))
+    (define render-result (make-channel))
+    (define mutation-result (make-channel))
+    (define render-worker
+      (thread (lambda ()
+                (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
+                  (call-with-kitty-graphics-test-hook
+                   (lambda (phase)
+                     (when (eq? phase 'iterator-owned)
+                       (semaphore-post render-entered)
+                       (semaphore-wait render-release)))
+                   (lambda () (channel-put render-result (terminal-render-snapshot terminal))))))))
+    (check-not-false (sync/timeout 10 render-entered))
+    (define mutate!
       (case operation-name
-        [(write)
-         (for ([_iteration (in-range 20)])
-           (terminal-write! terminal #"text"))]
-        [(resize)
-         (for ([size (in-range 10 30)])
-           (terminal-resize! terminal size 5 #:cell-width-px 8 #:cell-height-px 16))]
-        [(storage)
-         (for ([iteration (in-range 20)])
-           (terminal-set-kitty-image-storage-limit! terminal (if (even? iteration) 1000000 2000000)))]
-        [(reset)
-         (for ([_iteration (in-range 20)])
-           (terminal-reset! terminal))]
-        [(close) (terminal-close! terminal)]))
-    (define outcome (sync/timeout 10 result))
-    (check-not-false outcome)
-    (unless (or (eq? outcome 'completed) (exn:fail:ghostty:closed? outcome))
-      (raise outcome))
+        [(write) (lambda () (terminal-write! terminal #"text"))]
+        [(resize) (lambda () (terminal-resize! terminal 21 5 #:cell-width-px 8 #:cell-height-px 16))]
+        [(storage) (lambda () (terminal-set-kitty-image-storage-limit! terminal 2000000))]
+        [(reset) (lambda () (terminal-reset! terminal))]
+        [(close) (lambda () (terminal-close! terminal))]))
+    (define mutation-worker
+      (thread (lambda ()
+                (with-handlers ([exn? (lambda (error) (channel-put mutation-result error))])
+                  (call-with-kitty-graphics-test-hook (lambda (phase)
+                                                        (when (eq? phase 'terminal-lock-contended)
+                                                          (semaphore-post mutation-contended)))
+                                                      (lambda ()
+                                                        (mutate!)
+                                                        (channel-put mutation-result 'completed)))))))
+    (check-not-false (sync/timeout 10 mutation-contended))
+    (check-false (sync/timeout 0 mutation-result))
+    (semaphore-post render-release)
+    (define rendered (sync/timeout 10 render-result))
+    (check-not-false rendered)
+    (when (exn? rendered)
+      (raise rendered))
+    (check-true (render-snapshot? rendered))
+    (check-true (coherent-graphics? (render-snapshot-kitty-graphics rendered)))
+    (define mutation-outcome (sync/timeout 10 mutation-result))
+    (check-not-false mutation-outcome)
+    (unless (or (eq? mutation-outcome 'completed) (exn:fail:ghostty:closed? mutation-outcome))
+      (raise mutation-outcome))
+    (check-not-false (sync/timeout 10 (thread-dead-evt render-worker)))
+    (check-not-false (sync/timeout 10 (thread-dead-evt mutation-worker)))
     (terminal-close! terminal)))
+
+(test-case "iterator output-cell fallback frees the produced owner exactly once"
+  (call-with-terminal (lambda (terminal)
+                        (terminal-write! terminal direct-rgb)
+                        (define produced 0)
+                        (define released 0)
+                        (check-exn #rx"forced output-cell transfer failure"
+                                   (lambda ()
+                                     (call-with-kitty-graphics-test-hook
+                                      (lambda (phase)
+                                        (case phase
+                                          [(iterator-produced)
+                                           (set! produced (add1 produced))
+                                           (error 'iterator-produced
+                                                  "forced output-cell transfer failure")]
+                                          [(iterator-released) (set! released (add1 released))]))
+                                      (lambda () (terminal-render-snapshot terminal)))))
+                        (check-equal? produced 1)
+                        (check-equal? released 1)
+                        (check-true (coherent-graphics? (graphics terminal))))))
 
 (define-runtime-path kitty-test-path "kitty-graphics.rkt")
 
@@ -576,7 +615,7 @@
                   (terminal-render-snapshot terminal)
                   (define initial-cache (terminal-kitty-cache-generation/test terminal))
                   (terminal-write! terminal #"x")
-                  (interrupt-at terminal 'iterator-produced)
+                  (interrupt-at terminal 'iterator-owned)
                   (unless (equal? (terminal-kitty-cache-generation/test terminal) initial-cache)
                     (error 'kitty-break "iterator unwind changed the image cache"))
                   (define after-iterator (terminal-render-snapshot terminal))

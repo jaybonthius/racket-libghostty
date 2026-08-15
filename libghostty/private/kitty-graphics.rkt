@@ -271,15 +271,16 @@
         (values (kitty-graphics-snapshot generation placements immutable-images)
                 (kitty-graphics-cache generation immutable-images)))
       (lambda ()
-        (parameterize-break
-         #f
-         (unless released?
-           (set! released? #t)
-           (define owned-iterator (or iterator (ptr-ref iterator-output _pointer)))
-           (when owned-iterator
-             (cpointer-push-tag! owned-iterator 'GhosttyKittyGraphicsPlacementIterator)
-             (ptr-set! iterator-output _pointer #f)
-             (ghostty-kitty-graphics-placement-iterator-free owned-iterator))))))]))
+        (parameterize-break #f
+                            (unless released?
+                              (set! released? #t)
+                              (define owned-iterator (or iterator (ptr-ref iterator-output _pointer)))
+                              (when owned-iterator
+                                (cpointer-push-tag! owned-iterator
+                                                    'GhosttyKittyGraphicsPlacementIterator)
+                                (ptr-set! iterator-output _pointer #f)
+                                (ghostty-kitty-graphics-placement-iterator-free owned-iterator)
+                                (run-hook 'iterator-released))))))]))
 
 (module+ test-support
   (provide copy-image-values))
