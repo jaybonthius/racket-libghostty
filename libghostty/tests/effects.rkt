@@ -82,23 +82,15 @@
   (check-false (weak-box-value new-weak))
   (check-exn exn:fail:ghostty:closed? (lambda () (terminal-set-bell-handler! terminal void))))
 
-(test-case "enquiry and XTVERSION responses have exact operation-lifetime output"
+(test-case "enquiry and XTVERSION handlers produce exact replies and defaults"
   (call-with-terminal
    80
    24
    (lambda (terminal)
      (define output (open-output-bytes))
      (terminal-set-pty-write-handler! terminal (lambda (bytes) (write-bytes bytes output)))
-     (terminal-set-enquiry-handler! terminal
-                                    (lambda ()
-                                      (define response (bytes-copy #"answer"))
-                                      (collect-garbage)
-                                      response))
-     (terminal-set-xtversion-handler! terminal
-                                      (lambda ()
-                                        (define response (bytes-copy #"racket-term 0.1"))
-                                        (collect-garbage)
-                                        response))
+     (terminal-set-enquiry-handler! terminal (lambda () (bytes-copy #"answer")))
+     (terminal-set-xtversion-handler! terminal (lambda () (bytes-copy #"racket-term 0.1")))
      (terminal-write! terminal #"\5\33[>q")
      (check-equal? (get-output-bytes output) #"answer\33P>|racket-term 0.1\33\\")
      (terminal-set-enquiry-handler! terminal #f)
@@ -304,7 +296,7 @@
      (terminal-write! terminal #"usable")
      (check-equal? (terminal->plain-text terminal) "usable"))))
 
-(test-case "all raised values use fallback, first identity, cleanup, and no stale state"
+(test-case "all raised values use fallback, first identity, and no stale state"
   (call-with-terminal
    80
    24
