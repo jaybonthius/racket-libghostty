@@ -1,14 +1,21 @@
-.PHONY: link lint fmt resyntax
+SHELL := /bin/bash
 
-PACKAGE_NAMES := libghostty
-PACKAGE_DIRS := \
-	$(CURDIR)/libghostty
+.PHONY: native link test lint fmt docs clean
 
-RKT_FILES := $(shell find . -name '*.rkt' -not -path './.git/*' 2>/dev/null)
+PACKAGE_NAMES := libghostty-x86_64-linux libghostty libghostty-browser-terminal
+RKT_FILES := $(shell find libghostty examples/browser-terminal -name '*.rkt' -not -path '*/compiled/*' 2>/dev/null)
+
+native:
+	bin/build-linux-x86-64.sh
 
 link:
-	raco pkg update --link --no-setup $(PACKAGE_DIRS)
-	raco setup --no-zo --no-docs --pkgs $(PACKAGE_NAMES)
+	raco pkg install --auto --link --skip-installed --name libghostty-x86_64-linux $(CURDIR)/libghostty-x86_64-linux
+	raco pkg install --auto --link --skip-installed --name libghostty $(CURDIR)/libghostty
+	raco pkg install --auto --link --skip-installed --name libghostty-browser-terminal $(CURDIR)/examples/browser-terminal
+	raco setup --no-docs --pkgs $(PACKAGE_NAMES)
+
+test:
+	raco test libghostty/tests/ examples/browser-terminal/tests/
 
 lint:
 	@for f in $(RKT_FILES); do raco review $$f; done
@@ -16,5 +23,9 @@ lint:
 fmt:
 	@for f in $(RKT_FILES); do raco fmt -i $$f; done
 
-resyntax:
-	@for f in $(RKT_FILES); do resyntax fix --file $$f; done
+docs:
+	mkdir -p .build/docs
+	scribble --htmls ++xref-in setup/xref load-collections-xref --dest .build/docs libghostty/scribblings/libghostty.scrbl
+
+clean:
+	rm -rf .build/docs
