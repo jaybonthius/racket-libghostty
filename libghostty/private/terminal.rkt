@@ -684,11 +684,18 @@
   (set-snapshot-decoder-state! value 'finished))
 
 (define (release-snapshot-decoder! value)
-  (parameterize-break #f
-                      (call-with-semaphore
-                       (snapshot-decoder-lock value)
+  (call-with-semaphore (snapshot-decoder-lock value)
                        (lambda ()
-                         (close-snapshot-decoder/locked! 'snapshot-decoder-finalizer value)))))
+                         (define ready-terminal (snapshot-decoder-terminal value))
+                         (cond
+                           [ready-terminal
+                            (call-with-semaphore (terminal-lock ready-terminal)
+                                                 (lambda ()
+                                                   (close-snapshot-decoder/terminal-locked! value)))]
+                           [else
+                            (free-snapshot-decoder-native! value)
+                            (clear-snapshot-reader-roots! value)
+                            (set-snapshot-decoder-state! value 'closed)]))))
 
 (define (snapshot-decoder-native-pointer who value)
   (define pointer (unbox (snapshot-decoder-pointer value)))
