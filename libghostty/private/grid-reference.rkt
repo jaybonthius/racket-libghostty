@@ -5,7 +5,6 @@
          "ffi/color.rkt"
          "ffi/common.rkt"
          "ffi/grid-reference.rkt"
-         "ffi/point.rkt"
          "ffi/screen.rkt"
          "ffi/style.rkt"
          "render.rkt")
@@ -180,11 +179,5 @@
    (raw-query who ghostty-row-get raw-row 7 _stdbool)
    (raw-query who ghostty-row-get raw-row 8 _stdbool)))
 
-(define (copy-grid-reference-snapshot who terminal reference screen)
-  (define point (make-GhosttyPointCoordinate 0 0))
-  (check-ghostty-result who (ghostty-terminal-point-from-grid-ref terminal reference 2 point))
-  (grid-reference-snapshot
-   screen
-   (terminal-grid-point 'screen (GhosttyPointCoordinate-x point) (GhosttyPointCoordinate-y point))
-   (copy-cell who reference)
-   (copy-row who reference)))
+(define (copy-grid-reference-snapshot who reference screen point)
+  (grid-reference-snapshot screen point (copy-cell who reference) (copy-row who reference)))

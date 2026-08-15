@@ -3,6 +3,7 @@
 #include <ghostty/vt/key.h>
 #include <ghostty/vt/mouse.h>
 #include <ghostty/vt/render.h>
+#include <ghostty/vt/screen.h>
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/sgr.h>
 #include <ghostty/vt/snapshot.h>
@@ -108,6 +109,10 @@ bool ghostty_racket_selection_abi_check(void) {
                                   size_t *) = ghostty_grid_ref_hyperlink_uri;
   GhosttyResult (*grid_style)(const GhosttyGridRef *, GhosttyStyle *) =
       ghostty_grid_ref_style;
+  GhosttyResult (*cell_get)(GhosttyCell, GhosttyCellData, void *) =
+      ghostty_cell_get;
+  GhosttyResult (*row_get)(GhosttyRow, GhosttyRowData, void *) =
+      ghostty_row_get;
   GhosttyResult (*select_word)(GhosttyTerminal,
                                const GhosttyTerminalSelectWordOptions *,
                                GhosttySelection *) = ghostty_terminal_select_word;
@@ -138,6 +143,40 @@ bool ghostty_racket_selection_abi_check(void) {
       ghostty_terminal_selection_contains;
   return sizeof(GhosttyTrackedGridRef) == sizeof(void *) &&
       offsetof(GhosttyTerminalSelectionFormatOptions, size) == 0 &&
+      sizeof(GhosttyCell) == sizeof(uint64_t) &&
+      sizeof(GhosttyRow) == sizeof(uint64_t) &&
+      sizeof(GhosttyColorPaletteIndex) == sizeof(uint8_t) &&
+      sizeof(GhosttyCellData) == 4 &&
+      GHOSTTY_CELL_DATA_INVALID == 0 && GHOSTTY_CELL_DATA_CODEPOINT == 1 &&
+      GHOSTTY_CELL_DATA_CONTENT_TAG == 2 && GHOSTTY_CELL_DATA_WIDE == 3 &&
+      GHOSTTY_CELL_DATA_HAS_TEXT == 4 &&
+      GHOSTTY_CELL_DATA_HAS_STYLING == 5 && GHOSTTY_CELL_DATA_STYLE_ID == 6 &&
+      GHOSTTY_CELL_DATA_HAS_HYPERLINK == 7 &&
+      GHOSTTY_CELL_DATA_PROTECTED == 8 &&
+      GHOSTTY_CELL_DATA_SEMANTIC_CONTENT == 9 &&
+      GHOSTTY_CELL_DATA_COLOR_PALETTE == 10 &&
+      GHOSTTY_CELL_DATA_COLOR_RGB == 11 &&
+      sizeof(GhosttyRowData) == 4 && GHOSTTY_ROW_DATA_INVALID == 0 &&
+      GHOSTTY_ROW_DATA_WRAP == 1 && GHOSTTY_ROW_DATA_WRAP_CONTINUATION == 2 &&
+      GHOSTTY_ROW_DATA_GRAPHEME == 3 && GHOSTTY_ROW_DATA_STYLED == 4 &&
+      GHOSTTY_ROW_DATA_HYPERLINK == 5 &&
+      GHOSTTY_ROW_DATA_SEMANTIC_PROMPT == 6 &&
+      GHOSTTY_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER == 7 &&
+      GHOSTTY_ROW_DATA_DIRTY == 8 &&
+      sizeof(GhosttyCellContentTag) == 4 &&
+      GHOSTTY_CELL_CONTENT_CODEPOINT == 0 &&
+      GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME == 1 &&
+      GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE == 2 &&
+      GHOSTTY_CELL_CONTENT_BG_COLOR_RGB == 3 &&
+      sizeof(GhosttyCellWide) == 4 && GHOSTTY_CELL_WIDE_NARROW == 0 &&
+      GHOSTTY_CELL_WIDE_WIDE == 1 && GHOSTTY_CELL_WIDE_SPACER_TAIL == 2 &&
+      GHOSTTY_CELL_WIDE_SPACER_HEAD == 3 &&
+      sizeof(GhosttyCellSemanticContent) == 4 &&
+      GHOSTTY_CELL_SEMANTIC_OUTPUT == 0 && GHOSTTY_CELL_SEMANTIC_INPUT == 1 &&
+      GHOSTTY_CELL_SEMANTIC_PROMPT == 2 &&
+      sizeof(GhosttyRowSemanticPrompt) == 4 && GHOSTTY_ROW_SEMANTIC_NONE == 0 &&
+      GHOSTTY_ROW_SEMANTIC_PROMPT == 1 &&
+      GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION == 2 &&
       sizeof(GhosttyPointTag) == 4 &&
       GHOSTTY_POINT_TAG_ACTIVE == 0 && GHOSTTY_POINT_TAG_VIEWPORT == 1 &&
       GHOSTTY_POINT_TAG_SCREEN == 2 && GHOSTTY_POINT_TAG_HISTORY == 3 &&
@@ -170,8 +209,9 @@ bool ghostty_racket_selection_abi_check(void) {
       tracked_has_value != NULL && tracked_point != NULL &&
       tracked_set != NULL && tracked_snapshot != NULL && grid_cell != NULL &&
       grid_row != NULL && grid_graphemes != NULL && grid_hyperlink != NULL &&
-      grid_style != NULL && select_word != NULL &&
-      select_word_between != NULL && select_line != NULL &&
+      grid_style != NULL && cell_get != NULL && row_get != NULL &&
+      select_word != NULL && select_word_between != NULL &&
+      select_line != NULL &&
       select_all != NULL && select_output != NULL && format_alloc != NULL &&
       selection_adjust != NULL && selection_order != NULL &&
       selection_contains != NULL;

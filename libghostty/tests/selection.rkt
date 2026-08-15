@@ -1,6 +1,9 @@
 #lang racket/base
 
 (require libghostty
+         (only-in libghostty/private/selection-test-support
+                  terminal-raw-selection-endpoints-screen-convertible?
+                  terminal-test-hold-lock!)
          rackunit)
 
 (define (call-with-terminal columns rows procedure)
@@ -14,6 +17,29 @@
   (for/or ([row (in-vector (render-snapshot-row-data snapshot))])
     (for/or ([cell (in-vector (render-row-cells row))])
       (render-cell-selected? cell))))
+
+(define (sync/checked timeout event)
+  (define result (sync/timeout timeout event))
+  (check-not-false result)
+  result)
+
+(define (closed-or-completed? value)
+  (or (eq? value 'completed) (exn:fail:ghostty:closed? value)))
+
+(define (break-operation operation)
+  (define result (make-channel))
+  (define ready (make-semaphore 0))
+  (define worker
+    (thread (lambda ()
+              (with-handlers ([(lambda (_value) #t) (lambda (raised) (channel-put result raised))])
+                (semaphore-post ready)
+                (channel-put result (operation))))))
+  (sync/checked 10 ready)
+  (break-thread worker)
+  (define outcome (sync/checked 10 result))
+  (unless (or (exn:break? outcome) (not (exn? outcome)))
+    (raise outcome))
+  outcome)
 
 (test-case "tracked references copy complete cell and row values"
   (call-with-terminal
@@ -51,7 +77,11 @@
                    "é")
      (terminal-resize! terminal 10 6)
      (check-true (tracked-grid-reference-has-value? reference))
-     (tracked-grid-reference-close! reference))))
+     (tracked-grid-reference-set! reference (active 1 0))
+     (tracked-grid-reference-close! reference)
+     (collect-garbage)
+     (check-equal? (terminal-grid-cell-grapheme cell) "é")
+     (check-true (terminal-grid-row-grapheme? row)))))
 
 (test-case "wide tracked cells survive resize reflow"
   (call-with-terminal 8
@@ -65,6 +95,37 @@
                         (check-equal? (terminal-grid-cell-grapheme cell) "界")
                         (check-equal? (terminal-grid-cell-width cell) 2)
                         (tracked-grid-reference-close! reference))))
+
+(test-case "tracked snapshots inspect inactive primary and alternate owners"
+  (call-with-terminal
+   12
+   3
+   (lambda (terminal)
+     (terminal-write! terminal #"primary")
+     (define primary-reference (terminal-track-grid-reference terminal (active 0 0)))
+     (terminal-write! terminal #"\33[?1049h\33[H")
+     (terminal-write! terminal #"alternate")
+     (define alternate-reference (terminal-track-grid-reference terminal (active 0 0)))
+     (check-equal?
+      (terminal-grid-cell-grapheme (grid-reference-snapshot-cell (tracked-grid-reference->snapshot
+                                                                  alternate-reference)))
+      "a")
+     (define primary-snapshot (tracked-grid-reference->snapshot primary-reference))
+     (check-equal? (grid-reference-snapshot-screen primary-snapshot) 'primary)
+     (check-equal? (grid-reference-snapshot-point primary-snapshot) (terminal-grid-point 'screen 0 0))
+     (check-equal? (terminal-grid-cell-grapheme (grid-reference-snapshot-cell primary-snapshot)) "p")
+     (check-false (terminal-grid-row-wrap? (grid-reference-snapshot-row primary-snapshot)))
+     (terminal-write! terminal #"\33[?1049l")
+     (define alternate-snapshot (tracked-grid-reference->snapshot alternate-reference))
+     (check-equal? (grid-reference-snapshot-screen alternate-snapshot) 'alternate)
+     (check-equal? (grid-reference-snapshot-point alternate-snapshot)
+                   (terminal-grid-point 'screen 0 0))
+     (check-true (tracked-grid-reference-has-value? alternate-reference))
+     (check-equal? (terminal-grid-cell-grapheme (grid-reference-snapshot-cell alternate-snapshot))
+                   "a")
+     (check-false (terminal-grid-row-wrap? (grid-reference-snapshot-row alternate-snapshot)))
+     (tracked-grid-reference-close! primary-reference)
+     (tracked-grid-reference-close! alternate-reference))))
 
 (test-case "all coordinate spaces resolve and unrepresentable conversions return false"
   (call-with-terminal
@@ -172,6 +233,10 @@
      (check-equal? (render-row-selection first-row) (render-selection-range 6 9))
      (for ([x (in-range 6 10)])
        (check-true (render-cell-selected? (vector-ref (render-row-cells first-row) x))))
+     (terminal-set-selection! terminal (active 9 0) (active 6 0))
+     (check-equal? (terminal-selection-order terminal) 'reverse)
+     (terminal-set-selection! terminal (active 9 0) (active 6 1) #:rectangle? #t)
+     (check-equal? (terminal-selection-order terminal) 'mirrored-forward)
      (terminal-set-selection! terminal (active 6 1) (active 9 0) #:rectangle? #t)
      (check-equal? (terminal-selection-order terminal) 'mirrored-reverse)
      (check-true (terminal-selection-state-rectangle? (terminal-selection terminal)))
@@ -200,8 +265,13 @@
      (check-equal? (terminal-selection->plain-text terminal) "foo:bar  alpha beta")
      (check-true (terminal-select-line! terminal (active 12 0) #:whitespace-characters ""))
      (check-equal? (terminal-selection->plain-text terminal #:trim? #f) "foo:bar  alpha beta  ")
+     (terminal-write! terminal #"\33]133;A\7$ \33]133;B\7command\r\n")
+     (check-true (terminal-select-line! terminal (active 4 1)))
+     (check-equal? (terminal-selection->plain-text terminal) "$ command")
+     (check-true (terminal-select-line! terminal (active 4 1) #:semantic-prompt-boundary? #t))
+     (check-equal? (terminal-selection->plain-text terminal) "command")
      (terminal-write! terminal #"\33]133;A\7$ echo hi\r\n\33]133;C\7hi\r\n\33]133;D;0\7")
-     (check-true (terminal-select-output! terminal (active 0 2)))
+     (check-true (terminal-select-output! terminal (active 0 3)))
      (check-equal? (terminal-selection->plain-text terminal) "hi")
      (check-true (terminal-select-all! terminal))
      (check-regexp-match #rx"foo:bar" (terminal-selection->plain-text terminal)))))
@@ -225,12 +295,23 @@
      (terminal-set-selection! terminal (active 4 1) (active 4 1))
      (check-equal? (terminal-selection->plain-text terminal) ""))))
 
+(test-case "selection formatting copies UTF-8 graphemes"
+  (call-with-terminal 12
+                      2
+                      (lambda (terminal)
+                        (terminal-write! terminal (string->bytes/utf-8 "é 界"))
+                        (check-true (terminal-select-all! terminal))
+                        (define text (terminal-selection->plain-text terminal))
+                        (check-equal? text "é 界")
+                        (check-true (immutable? text)))))
+
 (test-case "selection state follows scrolling and clears garbage pins after pruning"
   (call-with-terminal
    20
    3
    (lambda (terminal)
      (terminal-write! terminal #"selected")
+     (define reference (terminal-track-grid-reference terminal (active 0 0)))
      (check-true (terminal-select-all! terminal))
      (define before (terminal-selection terminal))
      (for ([index (in-range 100)])
@@ -239,9 +320,12 @@
                    (terminal-selection-state-start before))
      (for ([index (in-range 100 20000)])
        (terminal-write! terminal (string->bytes/utf-8 (format "line-~a\r\n" index))))
+     (check-false (tracked-grid-reference-has-value? reference))
+     (check-true (terminal-raw-selection-endpoints-screen-convertible? terminal))
      (check-false (terminal-selection terminal))
      (check-false (terminal-selection->plain-text terminal))
-     (check-false (snapshot-selected? (terminal-render-snapshot terminal))))))
+     (check-false (snapshot-selected? (terminal-render-snapshot terminal)))
+     (tracked-grid-reference-close! reference))))
 
 (test-case "reset, screen switching, and snapshot restore omit selection state"
   (define terminal (make-terminal 10 2))
@@ -260,6 +344,29 @@
   (check-false (terminal-selection terminal))
   (terminal-close! restored)
   (terminal-close! terminal))
+
+(test-case "public semantic-selection and tracking workflow"
+  (call-with-terminal
+   20
+   4
+   (lambda (terminal)
+     (terminal-write! terminal #"\33]133;A\7$ \33]133;B\7echo hi\r\n\33]133;C\7hi\r\n\33]133;D;0\7")
+     (define reference (terminal-track-grid-reference terminal (active 0 1)))
+     (define before (tracked-grid-reference-point reference 'screen))
+     (check-true (terminal-select-output! terminal (active 0 1)))
+     (check-equal? (terminal-selection->plain-text terminal) "hi")
+     (check-true (snapshot-selected? (terminal-render-snapshot terminal)))
+     (for ([index (in-range 12)])
+       (terminal-write! terminal (string->bytes/utf-8 (format "later-~a\r\n" index))))
+     (check-false (tracked-grid-reference-point reference 'active))
+     (check-equal? (tracked-grid-reference-point reference 'screen) before)
+     (check-equal? (terminal-grid-cell-grapheme (grid-reference-snapshot-cell
+                                                 (tracked-grid-reference->snapshot reference)))
+                   "h")
+     (terminal-clear-selection! terminal)
+     (check-false (terminal-selection terminal))
+     (tracked-grid-reference-close! reference)
+     (check-true (tracked-grid-reference-closed? reference)))))
 
 (test-case "breaks during tracked construction and selection copying leave the terminal reusable"
   (call-with-terminal
@@ -282,6 +389,14 @@
        (when (tracked-grid-reference? outcome)
          (tracked-grid-reference-close! outcome)))
      (terminal-write! terminal (make-bytes 100000 (char->integer #\x)))
+     (for ([_iteration (in-range 5)])
+       (break-operation (lambda () (terminal-set-selection! terminal (active 0 0) (active 79 23))))
+       (check-true (terminal-select-all! terminal))
+       (check-true (terminal-selection-state? (terminal-selection terminal))))
+     (for ([_iteration (in-range 5)])
+       (break-operation (lambda () (terminal-select-all! terminal)))
+       (check-true (terminal-select-all! terminal))
+       (check-true (terminal-selection-state? (terminal-selection terminal))))
      (check-true (terminal-select-all! terminal))
      (for ([_iteration (in-range 5)])
        (define result (make-channel))
@@ -325,3 +440,72 @@
   (check-equal? outcome 'completed)
   (check-false (tracked-grid-reference-has-value? reference))
   (tracked-grid-reference-close! reference))
+
+(test-case "tracked set and selection mutation race terminal close"
+  (for ([operation-name (in-list '(query set))])
+    (define terminal (make-terminal 20 3))
+    (terminal-write! terminal #"race")
+    (define reference (terminal-track-grid-reference terminal (active 0 0)))
+    (define result (make-channel))
+    (define ready (make-semaphore 0))
+    (thread (lambda ()
+              (with-handlers ([exn? (lambda (error) (channel-put result error))])
+                (semaphore-post ready)
+                (for ([_iteration (in-range 500)])
+                  (case operation-name
+                    [(query) (tracked-grid-reference-point reference 'screen)]
+                    [(set) (tracked-grid-reference-set! reference (active 0 0))]))
+                (channel-put result 'completed))))
+    (sync/checked 10 ready)
+    (terminal-close! terminal)
+    (check-true (closed-or-completed? (sync/checked 10 result)))
+    (tracked-grid-reference-close! reference)
+    (tracked-grid-reference-close! reference)
+    (terminal-close! terminal))
+  (for ([operation-name (in-list '(install adjust))])
+    (define terminal (make-terminal 20 3))
+    (terminal-write! terminal #"selection race")
+    (terminal-set-selection! terminal (active 0 0) (active 3 0))
+    (define result (make-channel))
+    (define ready (make-semaphore 0))
+    (thread (lambda ()
+              (with-handlers ([exn? (lambda (error) (channel-put result error))])
+                (semaphore-post ready)
+                (for ([_iteration (in-range 500)])
+                  (case operation-name
+                    [(install) (terminal-set-selection! terminal (active 0 0) (active 3 0))]
+                    [(adjust) (terminal-selection-adjust! terminal 'right)]))
+                (channel-put result 'completed))))
+    (sync/checked 10 ready)
+    (terminal-close! terminal)
+    (check-true (closed-or-completed? (sync/checked 10 result)))
+    (terminal-close! terminal)))
+
+(test-case "busy cross-terminal tracked calls from callbacks fail without blocking"
+  (define first (make-terminal 8 2))
+  (define second (make-terminal 8 2))
+  (define reference (terminal-track-grid-reference second (active 0 0)))
+  (define busy (make-semaphore 0))
+  (define release (make-semaphore 0))
+  (define second-done (make-channel))
+  (define callback-error #f)
+  (define second-worker
+    (thread (lambda ()
+              (with-handlers ([exn? (lambda (error) (channel-put second-done error))])
+                (terminal-test-hold-lock! second busy release)
+                (channel-put second-done 'completed)))))
+  (sync/checked 10 busy)
+  (terminal-set-pty-write-handler! first
+                                   (lambda (_bytes)
+                                     (with-handlers ([exn:fail? (lambda (error)
+                                                                  (set! callback-error error))])
+                                       (tracked-grid-reference-point reference 'screen))))
+  (terminal-write! first #"\33[5n")
+  (check-true (exn:fail? callback-error))
+  (check-regexp-match #rx"lock is unavailable" (exn-message callback-error))
+  (semaphore-post release)
+  (check-equal? (sync/checked 10 second-done) 'completed)
+  (sync/checked 10 (thread-dead-evt second-worker))
+  (tracked-grid-reference-close! reference)
+  (terminal-close! first)
+  (terminal-close! second))

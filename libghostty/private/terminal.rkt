@@ -1563,16 +1563,25 @@
      (cond
        [(not native-terminal) #f]
        [else
-        (define reference (make-ghostty-grid-ref))
-        (define result (ghostty-tracked-grid-ref-snapshot pointer reference))
+        (define point-output (make-GhosttyPointCoordinate 0 0))
+        (define point-result (ghostty-tracked-grid-ref-point pointer 2 point-output))
         (cond
-          [(= result GHOSTTY-NO-VALUE) #f]
+          [(= point-result GHOSTTY-NO-VALUE) #f]
           [else
-           (check-ghostty-result 'tracked-grid-reference->snapshot result)
-           (copy-grid-reference-snapshot 'tracked-grid-reference->snapshot
-                                         native-terminal
-                                         reference
-                                         (tracked-grid-reference-screen value))])]))))
+           (check-ghostty-result 'tracked-grid-reference->snapshot point-result)
+           (define reference (make-ghostty-grid-ref))
+           (define snapshot-result (ghostty-tracked-grid-ref-snapshot pointer reference))
+           (cond
+             [(= snapshot-result GHOSTTY-NO-VALUE) #f]
+             [else
+              (check-ghostty-result 'tracked-grid-reference->snapshot snapshot-result)
+              (copy-grid-reference-snapshot
+               'tracked-grid-reference->snapshot
+               reference
+               (tracked-grid-reference-screen value)
+               (terminal-grid-point 'screen
+                                    (GhosttyPointCoordinate-x point-output)
+                                    (GhosttyPointCoordinate-y point-output)))])])]))))
 
 (define (selection-endpoint->screen-point who pointer reference)
   (define output (make-GhosttyPointCoordinate 0 0))
