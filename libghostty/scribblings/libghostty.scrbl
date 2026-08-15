@@ -114,13 +114,31 @@ Every nested struct is an immutable Racket value, every palette, row, and cell v
 
 @section{Input Encoding}
 
-@defproc[(key-event [action (or/c 'release 'press 'repeat)] [key symbol?] [#:modifiers modifiers list? null] [#:consumed-modifiers consumed-modifiers list? null] [#:text text (or/c #f string?) #f] [#:unshifted-codepoint codepoint (or/c #f char?) #f] [#:composing? composing? boolean? #f]) key-event?]{Creates an immutable keyboard event. Physical-key symbols cover the complete pinned W3C code family. Modifiers are duplicate-free lists drawn from @racket['shift], @racket['ctrl], @racket['alt], @racket['super], lock modifiers, and corresponding @racket['right-*] side bits; a side bit requires its base modifier. Text is copied and may not contain C0 or DEL.}
+@defproc[(physical-key? [value any/c]) boolean?]{Reports whether @racket[value] is one of the complete pinned @tt{GhosttyPhysicalKey} symbols accepted by @racket[key-event].}
+
+@defproc[(key-event [action (or/c 'release 'press 'repeat)] [key symbol?] [#:modifiers modifiers list? null] [#:consumed-modifiers consumed-modifiers list? null] [#:text text (or/c #f string?) #f] [#:unshifted-codepoint codepoint (or/c #f char?) #f] [#:composing? composing? boolean? #f]) key-event?]{Creates an immutable keyboard event. Physical-key symbols cover the complete pinned W3C code family. Modifiers are duplicate-free lists drawn from @racket['shift], @racket['ctrl], @racket['alt], @racket['super], lock modifiers, and corresponding @racket['right-*] side bits; a side bit requires its base modifier. Text is copied and may not contain C0, DEL, or the platform function-key range U+F700--U+F8FF.}
 
 @defproc[(key-event? [value any/c]) boolean?]{Reports whether @racket[value] is an immutable key event.}
+
+@defproc[(key-event-action [event key-event?]) (or/c 'release 'press 'repeat)]{Returns the copied action of @racket[event].}
+
+@defproc[(key-event-key [event key-event?]) physical-key?]{Returns the physical-key symbol of @racket[event].}
+
+@defproc[(key-event-modifiers [event key-event?]) list?]{Returns the immutable event's copied, duplicate-free modifier list.}
+
+@defproc[(key-event-consumed-modifiers [event key-event?]) list?]{Returns the immutable event's copied, duplicate-free consumed-modifier list.}
+
+@defproc[(key-event-text [event key-event?]) (or/c #f string?)]{Returns the copied text or @racket[#f]. The string is immutable and does not borrow native storage.}
+
+@defproc[(key-event-unshifted-codepoint [event key-event?]) (or/c #f char?)]{Returns the optional unshifted codepoint.}
+
+@defproc[(key-event-composing? [event key-event?]) boolean?]{Reports whether the event belongs to an active composition.}
 
 @defproc[(make-key-encoder [#:macos-option-as-alt option (or/c 'false 'true 'left 'right) 'false]) key-encoder?]{Creates an owned serialized encoder.}
 
 @defproc[(key-encoder? [value any/c]) boolean?]{Reports whether @racket[value] is a key encoder.}
+
+@defproc[(key-encoder-closed? [encoder key-encoder?]) boolean?]{Reports whether the owned native encoder has been closed.}
 
 @defproc[(key-encoder-close! [encoder key-encoder?]) void?]{Closes @racket[encoder] idempotently. An exactly-once finalizer is the fallback; all other operations raise @racket[exn:fail:ghostty:closed?] after close.}
 
@@ -130,19 +148,39 @@ Every nested struct is an immutable Racket value, every palette, row, and cell v
 
 @defproc[(key-encoder-encode [encoder key-encoder?] [event key-event?] [#:terminal terminal (or/c #f terminal?) #f]) bytes?]{Creates a temporary private native event, retains copied UTF-8 through the complete call, optionally synchronizes current terminal modes at call time, and returns immutable encoded bytes. Zero-output events return empty bytes. Required-size retry is internal.}
 
-@defstruct*[mouse-encoder-size ([screen-width exact-nonnegative-integer?] [screen-height exact-nonnegative-integer?] [cell-width exact-positive-integer?] [cell-height exact-positive-integer?] [padding-top exact-nonnegative-integer?] [padding-bottom exact-nonnegative-integer?] [padding-right exact-nonnegative-integer?] [padding-left exact-nonnegative-integer?])]{Immutable surface geometry. Values fit native @tt{uint32_t}; cell dimensions must be nonzero. Coordinates are never clamped by Racket.}
+@defstruct*[mouse-encoder-size ([screen-width exact-nonnegative-integer?] [screen-height exact-nonnegative-integer?] [cell-width exact-positive-integer?] [cell-height exact-positive-integer?] [padding-top exact-nonnegative-integer?] [padding-bottom exact-nonnegative-integer?] [padding-right exact-nonnegative-integer?] [padding-left exact-nonnegative-integer?])]{Immutable surface geometry. The constructor, predicate, and eight named accessors operate only on copied Racket values and own no native storage. Values fit native @tt{uint32_t}; cell dimensions must be nonzero, and the unpadded grid must fit native 16-bit grid coordinates. Coordinates are never clamped by Racket.}
 
-@defproc[(mouse-event [action (or/c 'press 'release 'motion)] [button (or/c #f symbol?)] [x real?] [y real?] [#:modifiers modifiers list? null]) mouse-event?]{Creates an immutable normalized event. @racket[#f] is distinct from the @racket['unknown] button. Coordinates must be finite and may be negative or outside the surface.}
+@defproc[(mouse-event [action (or/c 'press 'release 'motion)] [button (or/c #f symbol?)] [x (real-in -2147483648 2147483520)] [y (real-in -2147483648 2147483520)] [#:modifiers modifiers list? null]) mouse-event?]{Creates an immutable normalized event. @racket[#f] is distinct from the @racket['unknown] button. The exact inclusive coordinate bound is -2147483648 through 2147483520; the asymmetric upper endpoint is the largest IEEE-754 binary32 value not exceeding signed 32-bit maximum. Negative, subcell, and outside coordinates remain valid within that range. At encode time, the binding narrows to binary32 and also rejects coordinates whose padding subtraction would leave signed 32-bit range or whose grid conversion would exceed 16 bits, before calling native code.}
 
 @defproc[(mouse-event? [value any/c]) boolean?]{Reports whether @racket[value] is an immutable mouse event.}
+
+@defproc[(mouse-event-action [event mouse-event?]) (or/c 'press 'release 'motion)]{Returns the action of @racket[event].}
+
+@defproc[(mouse-event-button [event mouse-event?]) (or/c #f 'unknown 'left 'right 'middle 'four 'five 'six 'seven 'eight 'nine 'ten 'eleven)]{Returns the optional normalized button. @racket[#f] means no button; @racket['unknown] is a concrete native button identity.}
+
+@defproc[(mouse-event-x [event mouse-event?]) (real-in -2147483648 2147483520)]{Returns the copied surface-space horizontal coordinate.}
+
+@defproc[(mouse-event-y [event mouse-event?]) (real-in -2147483648 2147483520)]{Returns the copied surface-space vertical coordinate.}
+
+@defproc[(mouse-event-modifiers [event mouse-event?]) list?]{Returns the immutable event's copied modifier list.}
 
 @defproc[(make-mouse-encoder [#:size size mouse-encoder-size?] [#:deduplicate-motion? deduplicate? boolean? #t]) mouse-encoder?]{Creates an owned serialized mouse encoder. Explicit close through @racket[mouse-encoder-close!] is idempotent; finalization is exactly-once fallback.}
 
 @defproc[(mouse-encoder? [value any/c]) boolean?]{Reports whether @racket[value] is a mouse encoder.}
 
+@defproc[(mouse-encoder-closed? [encoder mouse-encoder?]) boolean?]{Reports whether the owned native encoder has been closed.}
+
 @defproc[(mouse-encoder-close! [encoder mouse-encoder?]) void?]{Closes @racket[encoder] idempotently. Other operations raise @racket[exn:fail:ghostty:closed?] afterward.}
 
-@defproc[(mouse-encoder-set-options! [encoder mouse-encoder?] [#:tracking tracking (or/c 'disabled 'x10 'normal 'button 'any)] [#:format format (or/c 'x10 'utf8 'sgr 'urxvt 'sgr-pixels)] [#:size size mouse-encoder-size?] [#:any-button-pressed? pressed? boolean?] [#:deduplicate-motion? deduplicate? boolean?]) void?]{Sets only supplied options. Dedicated size, button-state, reset, terminal-sync, close, and encode operations are also provided. Reset clears native last-cell deduplication state.}
+@defproc[(mouse-encoder-set-options! [encoder mouse-encoder?] [#:tracking tracking (or/c 'disabled 'x10 'normal 'button 'any)] [#:format format (or/c 'x10 'utf8 'sgr 'urxvt 'sgr-pixels)] [#:size size mouse-encoder-size?] [#:any-button-pressed? pressed? boolean?] [#:deduplicate-motion? deduplicate? boolean?]) void?]{Sets only supplied options. The encoder copies geometry into native state and retains the immutable Racket value only for pre-FFI coordinate validation; it does not borrow caller memory.}
+
+@defproc[(mouse-encoder-sync-terminal! [encoder mouse-encoder?] [terminal terminal?]) void?]{Copies current terminal tracking and output-format modes into @racket[encoder]. Geometry and button state are unchanged. Access to both owned handles is serialized.}
+
+@defproc[(mouse-encoder-set-size! [encoder mouse-encoder?] [size mouse-encoder-size?]) void?]{Copies @racket[size] into native encoder geometry and updates the Racket-side validation geometry.}
+
+@defproc[(mouse-encoder-set-any-button-pressed! [encoder mouse-encoder?] [pressed? boolean?]) void?]{Updates the native drag-reporting fact used for outside motion events.}
+
+@defproc[(mouse-encoder-reset! [encoder mouse-encoder?]) void?]{Clears native last-cell motion-deduplication state without changing options or geometry.}
 
 @defproc[(mouse-encoder-encode [encoder mouse-encoder?] [event mouse-event?] [#:terminal terminal (or/c #f terminal?) #f]) bytes?]{Optionally synchronizes tracking and format from current terminal state, then returns immutable protocol bytes. Native X10, UTF-8, SGR, URxvt, and SGR-pixels boundary behavior is preserved. Internal short-buffer retry preserves native deduplication state.}
 

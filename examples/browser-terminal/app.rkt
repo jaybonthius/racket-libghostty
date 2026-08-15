@@ -5,7 +5,6 @@
          libghostty
          racket/async-channel
          racket/file
-         racket/list
          racket/match
          racket/runtime-path
          racket/string
@@ -158,24 +157,27 @@
   (void))
 
 (define (browser-session-close! session)
-  (call-with-semaphore (browser-session-close-lock session)
-                       (lambda ()
-                         (unless (unbox (browser-session-closed? session))
-                           (set-box! (browser-session-closed? session) #t)
-                           (define failure #f)
-                           (with-handlers ([exn:fail? (lambda (error) (set! failure error))])
-                             (terminate-pty-process! (browser-session-process session)))
-                           (with-handlers ([exn:fail? void])
-                             (close-input-port (browser-session-master session)))
-                           (with-handlers ([exn:fail? void])
-                             (close-output-port (browser-session-master-output session)))
-                           (with-handlers ([exn:fail? (lambda (error)
-                                                        (unless failure
-                                                          (set! failure error)))])
-                             (mouse-encoder-close! (browser-session-mouse-encoder session))
-                             (key-encoder-close! (browser-session-key-encoder session))
-                             (terminal-close! (browser-session-terminal session)))
-                           (finish-session! session failure))))
+  (call-with-semaphore
+   (browser-session-close-lock session)
+   (lambda ()
+     (unless (unbox (browser-session-closed? session))
+       (define failure #f)
+       (call-with-semaphore (browser-session-state-lock session)
+                            (lambda ()
+                              (set-box! (browser-session-closed? session) #t)
+                              (with-handlers ([exn:fail? void])
+                                (close-output-port (browser-session-master-output session)))
+                              (with-handlers ([exn:fail? (lambda (error) (set! failure error))])
+                                (mouse-encoder-close! (browser-session-mouse-encoder session))
+                                (key-encoder-close! (browser-session-key-encoder session))
+                                (terminal-close! (browser-session-terminal session)))))
+       (with-handlers ([exn:fail? (lambda (error)
+                                    (unless failure
+                                      (set! failure error)))])
+         (terminate-pty-process! (browser-session-process session)))
+       (with-handlers ([exn:fail? void])
+         (close-input-port (browser-session-master session)))
+       (finish-session! session failure))))
   (void))
 
 (define named-browser-keys
@@ -319,24 +321,11 @@
 (define (key-text command)
   (define text (command-ref command 'text (lambda () #f)))
   (and (string? text)
-       (not (member text
-                    '("Alt" "ArrowDown"
-                            "ArrowLeft"
-                            "ArrowRight"
-                            "ArrowUp"
-                            "Backspace"
-                            "Control"
-                            "Delete"
-                            "End"
-                            "Enter"
-                            "Escape"
-                            "Home"
-                            "Insert"
-                            "Meta"
-                            "PageDown"
-                            "PageUp"
-                            "Shift"
-                            "Tab")))
+       (= (string-length text) 1)
+       (let* ([character (string-ref text 0)]
+              [codepoint (char->integer character)])
+         (and (or (char-graphic? character) (char=? character #\space))
+              (not (<= #xf700 codepoint #xf8ff))))
        text))
 
 (define (handle-key! session command)
@@ -381,26 +370,76 @@
                                   #:bracketed? bracketed?))
   'paste)
 
+(define (finite-measurement? value)
+  (and (real? value) (let ([inexact (exact->inexact value)]) (< -inf.0 inexact +inf.0))))
+
+(define (measurement command key #:positive? [require-positive? #f])
+  (define value (command-ref command key (lambda () 0)))
+  (unless (and (finite-measurement? value)
+               (if require-positive?
+                   (positive? value)
+                   (not (negative? value))))
+    (raise-arguments-error 'browser-session-handle-command!
+                           (if require-positive?
+                               "measurement must be finite and positive"
+                               "measurement must be finite and nonnegative")
+                           (symbol->string key)
+                           value))
+  value)
+
 (define (pixel-integer value)
-  (if (exact-integer? value)
-      value
-      (inexact->exact (round value))))
+  (inexact->exact (round value)))
 
 (define (handle-resize! session command)
-  (define columns (command-ref command 'columns))
-  (define rows (command-ref command 'rows))
-  (define cell-width (pixel-integer (command-ref command 'cell-width)))
-  (define cell-height (pixel-integer (command-ref command 'cell-height)))
+  (define screen-width-raw (measurement command 'screen-width #:positive? #t))
+  (define screen-height-raw (measurement command 'screen-height #:positive? #t))
+  (define cell-width-raw (measurement command 'cell-width #:positive? #t))
+  (define cell-height-raw (measurement command 'cell-height #:positive? #t))
+  (define padding-top-raw (measurement command 'padding-top))
+  (define padding-bottom-raw (measurement command 'padding-bottom))
+  (define padding-right-raw (measurement command 'padding-right))
+  (define padding-left-raw (measurement command 'padding-left))
+  (define available-width (- screen-width-raw padding-left-raw padding-right-raw))
+  (define available-height (- screen-height-raw padding-top-raw padding-bottom-raw))
+  (define columns (inexact->exact (floor (/ available-width cell-width-raw))))
+  (define rows (inexact->exact (floor (/ available-height cell-height-raw))))
+  (define screen-width (pixel-integer screen-width-raw))
+  (define screen-height (pixel-integer screen-height-raw))
+  (define cell-width (pixel-integer cell-width-raw))
+  (define cell-height (pixel-integer cell-height-raw))
+  (define padding-top (pixel-integer padding-top-raw))
+  (define padding-bottom (pixel-integer padding-bottom-raw))
+  (define padding-right (pixel-integer padding-right-raw))
+  (define padding-left (pixel-integer padding-left-raw))
+  (unless (and
+           (<= 1 columns 65535)
+           (<= 1 rows 65535)
+           (<= 1 screen-width 65535)
+           (<= 1 screen-height 65535)
+           (<= 1 cell-width 4294967295)
+           (<= 1 cell-height 4294967295)
+           (for/and ([padding (in-list (list padding-top padding-bottom padding-right padding-left))])
+             (<= 0 padding 4294967295)))
+    (raise-arguments-error 'browser-session-handle-command!
+                           "resize measurements produce dimensions outside native ranges"
+                           "columns"
+                           columns
+                           "rows"
+                           rows
+                           "screen-width"
+                           screen-width
+                           "screen-height"
+                           screen-height))
   (define geometry
-    (mouse-encoder-size (pixel-integer (command-ref command 'screen-width))
-                        (pixel-integer (command-ref command 'screen-height))
+    (mouse-encoder-size screen-width
+                        screen-height
                         cell-width
                         cell-height
-                        (pixel-integer (command-ref command 'padding-top (lambda () 0)))
-                        (pixel-integer (command-ref command 'padding-bottom (lambda () 0)))
-                        (pixel-integer (command-ref command 'padding-right (lambda () 0)))
-                        (pixel-integer (command-ref command 'padding-left (lambda () 0)))))
-  (resize-pty! (browser-session-master session) columns rows)
+                        padding-top
+                        padding-bottom
+                        padding-right
+                        padding-left))
+  (resize-pty! (browser-session-master session) columns rows screen-width screen-height)
   (terminal-resize! (browser-session-terminal session)
                     columns
                     rows

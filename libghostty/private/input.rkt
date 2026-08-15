@@ -2,7 +2,6 @@
 
 (require ffi/unsafe
          racket/list
-         racket/math
          "abi.rkt"
          "error.rkt"
          "ffi/common.rkt"
@@ -280,7 +279,7 @@
       (and (string? value)
            (for/and ([character (in-string value)])
              (define codepoint (char->integer character))
-             (and (not (< codepoint 32)) (not (= codepoint 127)))))))
+             (and (>= codepoint 32) (not (= codepoint 127)) (not (<= #xf700 codepoint #xf8ff)))))))
 
 (define (symbols->mask values table)
   (for/fold ([mask 0]) ([value (in-list values)])
@@ -467,9 +466,11 @@
                            (lambda (buffer capacity)
                              (ghostty-key-encoder-encode pointer event-pointer buffer capacity))))))))
 
+(define minimum-mouse-coordinate -2147483648)
+(define maximum-mouse-coordinate 2147483520)
+
 (define (finite-coordinate? value)
-  (and (real? value)
-       (let ([inexact (exact->inexact value)]) (and (not (infinite? inexact)) (not (nan? inexact))))))
+  (and (real? value) (<= minimum-mouse-coordinate value maximum-mouse-coordinate)))
 
 (struct mouse-event-value (action button x y modifiers) #:transparent #:reflection-name 'mouse-event)
 
@@ -508,6 +509,19 @@
                                      cell-width
                                      "cell-height"
                                      cell-height))
+            (define grid-width (max 0 (- screen-width padding-left padding-right)))
+            (define grid-height (max 0 (- screen-height padding-top padding-bottom)))
+            (unless (and (<= grid-width (* 65535 cell-width)) (<= grid-height (* 65535 cell-height)))
+              (raise-arguments-error 'mouse-encoder-size
+                                     "geometry exceeds native grid-coordinate range"
+                                     "screen-width"
+                                     screen-width
+                                     "screen-height"
+                                     screen-height
+                                     "cell-width"
+                                     cell-width
+                                     "cell-height"
+                                     cell-height))
             (values screen-width
                     screen-height
                     cell-width
@@ -517,7 +531,7 @@
                     padding-right
                     padding-left)))
 
-(struct mouse-encoder (pointer lock) #:authentic)
+(struct mouse-encoder (pointer lock geometry) #:authentic)
 
 (define (release-mouse-encoder! value)
   (define pointer-box (mouse-encoder-pointer value))
@@ -565,7 +579,7 @@
     (when pointer
       (ghostty-mouse-encoder-free pointer))
     (check-ghostty-result 'make-mouse-encoder result))
-  (define value (mouse-encoder (box pointer) (make-semaphore 1)))
+  (define value (mouse-encoder (box pointer) (make-semaphore 1) (box size)))
   (register-finalizer value release-mouse-encoder!)
   (with-handlers ([exn? (lambda (error)
                           (mouse-encoder-close! value)
@@ -613,7 +627,8 @@
                           (hash-ref (hash 'x10 0 'utf8 1 'sgr 2 'urxvt 3 'sgr-pixels 4) format)))
      (unless (eq? size unset)
        (define native-size (size->native size))
-       (ghostty-mouse-encoder-setopt pointer 2 native-size))
+       (ghostty-mouse-encoder-setopt pointer 2 native-size)
+       (set-box! (mouse-encoder-geometry value) size))
      (unless (eq? any-button-pressed? unset)
        (set-mouse-option! pointer 3 _stdbool any-button-pressed?))
      (unless (eq? deduplicate-motion? unset)
@@ -656,6 +671,28 @@
         'eleven
         11))
 
+(define (coordinate->native value)
+  (floating-point-bytes->real (real->floating-point-bytes value 4 #f) #f))
+
+(define (coordinate-safe-for-size? value padding cell-size)
+  (define terminal-coordinate (- (coordinate->native value) padding))
+  (and (<= minimum-mouse-coordinate terminal-coordinate maximum-mouse-coordinate)
+       (< (/ (max 0 terminal-coordinate) cell-size) 65536)))
+
+(define (check-mouse-event-coordinates who event size)
+  (unless (and (coordinate-safe-for-size? (mouse-event-x event)
+                                          (mouse-encoder-size-padding-left size)
+                                          (mouse-encoder-size-cell-width size))
+               (coordinate-safe-for-size? (mouse-event-y event)
+                                          (mouse-encoder-size-padding-top size)
+                                          (mouse-encoder-size-cell-height size)))
+    (raise-arguments-error who
+                           "coordinates exceed the native conversion range for the encoder size"
+                           "x"
+                           (mouse-event-x event)
+                           "y"
+                           (mouse-event-y event))))
+
 (define (call-with-native-mouse-event event procedure)
   (define-values (result pointer) (ghostty-mouse-event-new #f))
   (unless (= result GHOSTTY-SUCCESS)
@@ -688,6 +725,9 @@
    'mouse-encoder-encode
    value
    (lambda (pointer)
+     (check-mouse-event-coordinates 'mouse-encoder-encode
+                                    event
+                                    (unbox (mouse-encoder-geometry value)))
      (when terminal
        (sync-mouse-encoder-pointer! pointer terminal 'mouse-encoder-encode))
      (call-with-native-mouse-event

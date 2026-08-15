@@ -63,9 +63,8 @@ function sendResize() {
   const cell = viewport.querySelector(".terminal-cell")?.getBoundingClientRect();
   if (!cell || cell.width === 0 || cell.height === 0) return;
   const style = getComputedStyle(viewport);
-  send({type: "resize", columns: Math.floor(bounds.width / cell.width),
-        rows: Math.floor(bounds.height / cell.height), screenWidth: bounds.width,
-        screenHeight: bounds.height, cellWidth: cell.width, cellHeight: cell.height,
+  send({type: "resize", screenWidth: bounds.width, screenHeight: bounds.height,
+        cellWidth: cell.width, cellHeight: cell.height,
         paddingTop: parseFloat(style.paddingTop), paddingBottom: parseFloat(style.paddingBottom),
         paddingRight: parseFloat(style.paddingRight), paddingLeft: parseFloat(style.paddingLeft)});
 }

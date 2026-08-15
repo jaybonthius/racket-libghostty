@@ -6,6 +6,12 @@
 
 (provide spawn-pty-command
          resize-pty!
+         get-pty-winsize
+         pty-winsize?
+         pty-winsize-rows
+         pty-winsize-columns
+         pty-winsize-x-pixels
+         pty-winsize-y-pixels
          wait-pty-process!
          terminate-pty-process!)
 
@@ -35,9 +41,12 @@
 (define-libc close-fd (_fun _int -> _int) #:c-id close)
 
 (define-libc signal-process (_fun _int _int -> _int) #:c-id kill)
-(define-libc resize-file-descriptor (_fun _int _ulong _winsize-pointer -> _int) #:c-id ioctl)
+(define-libc winsize-file-descriptor (_fun _int _ulong _winsize-pointer -> _int) #:c-id ioctl)
 
+(define TIOCGWINSZ #x5413)
 (define TIOCSWINSZ #x5414)
+
+(struct pty-winsize (rows columns x-pixels y-pixels) #:transparent)
 
 (define (checked-dup descriptor)
   (define copy (dup-fd descriptor))
@@ -100,14 +109,41 @@
     (close-port slave-error)
     (values process master-input master-output)))
 
-(define (resize-pty! port columns rows [x-pixels 0] [y-pixels 0])
+(define (uint16-dimension? value)
+  (and (exact-integer? value) (<= 1 value 65535)))
+
+(define (resize-pty! port columns rows [x-pixels 1] [y-pixels 1])
+  (unless (and (uint16-dimension? columns)
+               (uint16-dimension? rows)
+               (uint16-dimension? x-pixels)
+               (uint16-dimension? y-pixels))
+    (raise-arguments-error 'resize-pty!
+                           "dimensions must be exact integers from 1 through 65535"
+                           "columns"
+                           columns
+                           "rows"
+                           rows
+                           "x-pixels"
+                           x-pixels
+                           "y-pixels"
+                           y-pixels))
   (define descriptor (unsafe-port->file-descriptor port))
   (unless (and descriptor
-               (zero? (resize-file-descriptor descriptor
-                                              TIOCSWINSZ
-                                              (make-winsize rows columns x-pixels y-pixels))))
+               (zero? (winsize-file-descriptor descriptor
+                                               TIOCSWINSZ
+                                               (make-winsize rows columns x-pixels y-pixels))))
     (error 'resize-pty! "could not resize PTY"))
   (void))
+
+(define (get-pty-winsize port)
+  (define descriptor (unsafe-port->file-descriptor port))
+  (define size (make-winsize 0 0 0 0))
+  (unless (and descriptor (zero? (winsize-file-descriptor descriptor TIOCGWINSZ size)))
+    (error 'get-pty-winsize "could not read PTY size"))
+  (pty-winsize (winsize-rows size)
+               (winsize-columns size)
+               (winsize-x-pixels size)
+               (winsize-y-pixels size)))
 
 (define (wait-pty-process! process)
   (subprocess-wait process)

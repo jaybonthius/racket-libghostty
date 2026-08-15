@@ -1,7 +1,9 @@
 #lang racket/base
 
 (require browser-terminal/app
+         json
          libghostty
+         net/http-client
          net/url
          racket/file
          racket/path
@@ -64,6 +66,30 @@
   (define-values (ready result) (start-http-read port path))
   (receive-with-timeout 'bounded-http-get ready timeout)
   (receive-with-timeout 'bounded-http-get result timeout))
+
+(define (http-post-command port command)
+  (define-values (status _headers input)
+    (http-sendrecv "127.0.0.1"
+                   "/commands"
+                   #:port port
+                   #:method #"POST"
+                   #:headers '("Content-Type: application/json")
+                   #:data (jsexpr->bytes command)))
+  (port->bytes input)
+  (close-input-port input)
+  status)
+
+(define (wait-for-output session pattern [timeout 2])
+  (define deadline (+ (current-inexact-milliseconds) (* timeout 1000.0)))
+  (let loop ()
+    (define output (browser-session-output session))
+    (cond
+      [(regexp-match? pattern output) output]
+      [(>= (current-inexact-milliseconds) deadline)
+       (error 'wait-for-output "output did not match ~a: ~s" pattern output)]
+      [else
+       (sleep 0.01)
+       (loop)])))
 
 (define no-color (render-style-color 'none #f))
 (define default-style (render-style no-color no-color no-color #f #f #f #f #f #f #f #f 'none))
@@ -136,7 +162,15 @@
                               "input-adapter.js")))
   (for ([fact '("key" "resize" "paste" "pointer" "wheel" "sequence" "deltaX" "cellWidth")])
     (check-true (string-contains? source fact)))
-  (for ([policy '("\\u001b" "\\x1b" "2004" "1006" "bracketed" "alternate-scroll" "clamp")])
+  (for ([policy '("columns" "rows"
+                            "Math.floor"
+                            "\\u001b"
+                            "\\x1b"
+                            "2004"
+                            "1006"
+                            "bracketed"
+                            "alternate-scroll"
+                            "clamp")])
     (check-false (string-contains? source policy))))
 
 (test-case "server command handler preserves order and routes native input"
@@ -157,19 +191,26 @@
                                                           3
                                                           'type
                                                           "resize"
-                                                          'columns
-                                                          79
-                                                          'rows
-                                                          23
                                                           'screen-width
-                                                          790
+                                                          810
                                                           'screen-height
-                                                          460
+                                                          480
                                                           'cell-width
                                                           10
                                                           'cell-height
-                                                          20))
+                                                          20
+                                                          'padding-top
+                                                          10
+                                                          'padding-bottom
+                                                          10
+                                                          'padding-right
+                                                          10
+                                                          'padding-left
+                                                          10))
                    'resize)
+     (define resized (browser-session-snapshot session))
+     (check-equal? (render-snapshot-columns resized) 79)
+     (check-equal? (render-snapshot-rows resized) 23)
      (check-equal? (browser-session-handle-command!
                     session
                     (hash 'sequence 4 'type "pointer" 'action "press" 'button 0 'x 0.0 'y 0.0))
@@ -185,6 +226,104 @@
                    session
                    (hash 'sequence 5 'type "key" 'action "release" 'code "KeyA" 'text "a")))))
    (lambda () (browser-session-close! session))))
+
+(test-case "server forwards only single printable browser key text"
+  (define-values (_app session) (make-browser-terminal-app))
+  (dynamic-wind
+   void
+   (lambda ()
+     (for ([code (in-list '("F1" "CapsLock" "MediaPlayPause" "KeyD" "Unidentified"))]
+           [text (in-list '("F1" "CapsLock" "MediaPlayPause" "Dead" "Unidentified"))]
+           [sequence (in-naturals 1)])
+       (check-equal? (browser-session-handle-command!
+                      session
+                      (hash 'sequence sequence 'type "key" 'action "press" 'code code 'text text))
+                     'key))
+     (check-equal? (browser-session-handle-command!
+                    session
+                    (hash 'sequence 6 'type "key" 'action "press" 'code "KeyZ" 'text "z"))
+                   'key)
+     (define output (wait-for-output session #rx"z"))
+     (for ([label (in-list '("F1" "CapsLock" "MediaPlayPause" "Dead" "Unidentified"))])
+       (check-false (string-contains? output label))))
+   (lambda () (browser-session-close! session))))
+
+(test-case "HTTP commands encode PTY input and preserve route sequence"
+  (define custodian (make-custodian))
+  (define port (unused-port))
+  (define stop #f)
+  (define session #f)
+  (dynamic-wind
+   (lambda ()
+     (parameterize ([current-custodian custodian])
+       (define-values (new-stop new-session) (serve-browser-terminal #:port port))
+       (set! stop new-stop)
+       (set! session new-session)))
+   (lambda ()
+     (check-true (string-contains? (bounded-http-get port "/") "libghostty browser terminal"))
+     (check-true
+      (regexp-match?
+       #rx" 204 "
+       (http-post-command
+        port
+        (hash 'sequence 1 'type "key" 'action "press" 'code "KeyQ" 'text "q" 'composing #f))))
+     (check-true
+      (regexp-match?
+       #rx" 204 "
+       (http-post-command
+        port
+        (hash 'sequence 2 'type "key" 'action "press" 'code "Enter" 'text "Enter" 'composing #f))))
+     (check-true (string-contains? (wait-for-output session #rx"q") "q"))
+     (check-exn exn:fail?
+                (lambda ()
+                  (browser-session-handle-command!
+                   session
+                   (hash 'sequence 2 'type "key" 'action "release" 'code "KeyQ" 'text "q")))))
+   (lambda ()
+     (when stop
+       (with-handlers ([exn:fail? void])
+         (stop)))
+     (custodian-shutdown-all custodian))))
+
+(test-case "PTY resize records rows columns and pixel dimensions"
+  (define-values (process master master-output) (spawn-pty-command 80 24 "/bin/sleep" (list "30")))
+  (dynamic-wind void
+                (lambda ()
+                  (resize-pty! master 79 23 810 480)
+                  (define size (get-pty-winsize master))
+                  (check-equal? (pty-winsize-columns size) 79)
+                  (check-equal? (pty-winsize-rows size) 23)
+                  (check-equal? (pty-winsize-x-pixels size) 810)
+                  (check-equal? (pty-winsize-y-pixels size) 480)
+                  (check-exn exn:fail:contract? (lambda () (resize-pty! master 80 24 65536 480))))
+                (lambda ()
+                  (with-handlers ([exn:fail? void])
+                    (terminate-pty-process! process))
+                  (with-handlers ([exn:fail? void])
+                    (close-input-port master))
+                  (with-handlers ([exn:fail? void])
+                    (close-output-port master-output)))))
+
+(test-case "commands and close serialize PTY and native ownership"
+  (define-values (_app session) (make-browser-terminal-app))
+  (define ready (make-semaphore))
+  (define result (make-channel))
+  (define writer
+    (thread (lambda ()
+              (semaphore-post ready)
+              (with-handlers ([exn:fail? (lambda (error) (channel-put result error))])
+                (channel-put
+                 result
+                 (browser-session-handle-command!
+                  session
+                  (hash 'sequence 1 'type "key" 'action "press" 'code "KeyA" 'text "a")))))))
+  (semaphore-wait ready)
+  (browser-session-close! session)
+  (define writer-result (sync/timeout 2 result))
+  (check-true (or (eq? writer-result 'key)
+                  (and (exn:fail? writer-result)
+                       (regexp-match? #rx"session is closed" (exn-message writer-result)))))
+  (check-not-false (sync/timeout 2 (thread-dead-evt writer))))
 
 (test-case "SSE receives a live PTY update after its initial snapshot"
   (define custodian (make-custodian))

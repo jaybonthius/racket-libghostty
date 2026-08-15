@@ -1,7 +1,6 @@
 #lang racket/base
 
 (require libghostty
-         racket/string
          rackunit)
 
 (define default-size (mouse-encoder-size 100 80 10 20 5 5 5 5))
@@ -111,6 +110,30 @@
        (mouse-encoder-set-options! encoder #:format format)
        (check-not-equal? (mouse-encoder-encode encoder (mouse-event 'press 'left 20 40)) #"")))))
 
+(test-case "mouse coordinates reject unsafe float and native integer conversions"
+  (for ([coordinate (in-list (list 2147483521 2147483647 1e39 -2147483649))])
+    (check-exn exn:fail:contract? (lambda () (mouse-event 'motion #f coordinate 0))))
+  (define boundary-size (mouse-encoder-size 100 80 4294967295 4294967295 0 0 0 0))
+  (call-with-mouse-encoder
+   (lambda (encoder)
+     (mouse-encoder-set-options! encoder
+                                 #:tracking 'any
+                                 #:format 'sgr-pixels
+                                 #:any-button-pressed? #t
+                                 #:deduplicate-motion? #f)
+     (check-equal? (mouse-encoder-encode encoder (mouse-event 'motion #f -2147483648 0))
+                   #"\33[<35;-2147483648;0M")
+     (check-equal? (mouse-encoder-encode encoder (mouse-event 'motion #f 2147483520 0))
+                   #"\33[<35;2147483520;0M"))
+   #:size boundary-size)
+  (call-with-mouse-encoder
+   (lambda (encoder)
+     (mouse-encoder-set-options! encoder #:tracking 'any #:any-button-pressed? #t)
+     (check-exn exn:fail:contract?
+                (lambda () (mouse-encoder-encode encoder (mouse-event 'motion #f -2147483648 0))))
+     (check-exn exn:fail:contract?
+                (lambda () (mouse-encoder-encode encoder (mouse-event 'motion #f 655365 0)))))))
+
 (test-case "mouse geometry delegates padding, negative, boundary, and outside policy to native"
   (call-with-mouse-encoder
    (lambda (encoder)
@@ -178,13 +201,16 @@
                                   (lambda () (key-event 'press 'a #:modifiers '(ctrl ctrl)))
                                   (lambda () (key-event 'press 'a #:text "x\0y"))
                                   (lambda () (key-event 'press 'a #:text "\177"))
+                                  (lambda () (key-event 'press 'a #:text "\uf700"))
+                                  (lambda () (key-event 'press 'a #:text "\uf8ff"))
                                   (lambda () (mouse-event 'drag 'left 0 0))
                                   (lambda () (mouse-event 'press 'wheel 0 0))
                                   (lambda () (mouse-event 'motion #f +nan.0 0))
                                   (lambda () (mouse-event 'motion #f +inf.0 0))
                                   (lambda () (mouse-encoder-size 10 10 0 1 0 0 0 0))
                                   (lambda () (mouse-encoder-size 10 10 1 0 0 0 0 0))
-                                  (lambda () (mouse-encoder-size 4294967296 10 1 1 0 0 0 0))))])
+                                  (lambda () (mouse-encoder-size 4294967296 10 1 1 0 0 0 0))
+                                  (lambda () (mouse-encoder-size 65536 10 1 1 0 0 0 0))))])
     (check-exn exn:fail:contract? operation)))
 
 (test-case "size reports and terminal mode queries are native and immutable"
