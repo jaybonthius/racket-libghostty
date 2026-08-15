@@ -3,6 +3,7 @@
 #include <ghostty/vt/render.h>
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/sgr.h>
+#include <ghostty/vt/snapshot.h>
 #include <ghostty/vt/size_report.h>
 #include <ghostty/vt/style.h>
 #include <ghostty/vt/terminal.h>
@@ -36,6 +37,44 @@ bool ghostty_racket_terminal_continuation_abi_check(void) {
       GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES == 36 &&
       GHOSTTY_TERMINAL_DATA_VT_GROUND == 38 &&
       write_until_ground != NULL && continuation_alloc != NULL;
+}
+
+bool ghostty_racket_snapshot_abi_check(void) {
+  GhosttyResult (*encode_alloc)(GhosttyTerminal, const GhosttyAllocator *,
+                                uint8_t **, size_t *) =
+      ghostty_snapshot_encode_alloc;
+  GhosttyResult (*decoder_new_buf)(const GhosttyAllocator *,
+                                   GhosttySnapshotDecoder *, const uint8_t *,
+                                   size_t) =
+      ghostty_snapshot_decoder_new_buf;
+  void (*decoder_free)(GhosttySnapshotDecoder) =
+      ghostty_snapshot_decoder_free;
+  GhosttyResult (*decoder_set)(GhosttySnapshotDecoder,
+                               GhosttySnapshotDecoderOption, const void *) =
+      ghostty_snapshot_decoder_set;
+  GhosttyResult (*decoder_decode)(GhosttySnapshotDecoder, GhosttyTerminal *) =
+      ghostty_snapshot_decoder_decode;
+  GhosttyResult (*decoder_get)(GhosttySnapshotDecoder,
+                               GhosttySnapshotDecoderData, void *) =
+      ghostty_snapshot_decoder_get;
+  return sizeof(size_t) == 8 &&
+      sizeof(GhosttySnapshotDecoder) == sizeof(void *) &&
+      sizeof(GhosttySnapshotDecoderOption) == 4 &&
+      GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES == 0 &&
+      GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_VALUE == GHOSTTY_ENUM_MAX_VALUE &&
+      sizeof(GhosttySnapshotDecoderData) == 4 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_INVALID == 0 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES == 1 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET == 2 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY == 3 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE == 4 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN == 5 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS == 6 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING == 7 &&
+      GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_VALUE == GHOSTTY_ENUM_MAX_VALUE &&
+      encode_alloc != NULL && decoder_new_buf != NULL &&
+      decoder_free != NULL && decoder_set != NULL &&
+      decoder_decode != NULL && decoder_get != NULL;
 }
 
 size_t ghostty_racket_render_state_row_selection_size(void) {

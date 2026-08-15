@@ -7,6 +7,7 @@
          "ffi/effects.rkt"
          "ffi/formatter.rkt"
          "ffi/render.rkt"
+         "ffi/snapshot.rkt"
          "ffi/terminal.rkt"
          "render.rkt")
 
@@ -22,6 +23,8 @@
          terminal-set-continuation-max-bytes!
          terminal-continuation-bytes
          terminal-vt-ground?
+         terminal-snapshot-bytes
+         snapshot-bytes->terminal
          terminal->plain-text
          terminal-render-snapshot
          terminal-set-pty-write-handler!
@@ -63,6 +66,8 @@
 (define continuation-max-bytes-option 31)
 (define continuation-max-bytes-data 36)
 (define vt-ground-data 38)
+(define snapshot-decoder-max-continuation-bytes-option 0)
+(define snapshot-decoder-source-offset-data 2)
 
 (define (check-callback-reentrancy who value)
   (when (eq? value (current-callback-terminal))
@@ -103,9 +108,7 @@
                         (lambda () (void/reference-sink value)))
           (loop)))))
 
-(define (make-terminal columns rows #:continuation-max-bytes [continuation-max-bytes 0])
-  (check-libghostty-abi!)
-  (define pointer #f)
+(define (adopt-terminal-pointer who pointer [prepare void])
   (define render-state #f)
   (define row-iterator #f)
   (define row-cells #f)
@@ -117,29 +120,24 @@
                             (ghostty-render-state-row-iterator-free row-iterator))
                           (when render-state
                             (ghostty-render-state-free render-state))
-                          (when pointer
-                            (ghostty-terminal-free pointer))
+                          (ghostty-terminal-free pointer)
                           (when effects-state
                             (ghostty-racket-terminal-effects-free effects-state))
                           (raise error))])
-    (define-values (terminal-result new-pointer) (ghostty-terminal-new #f columns rows))
-    (set! pointer new-pointer)
-    (check-ghostty-result 'make-terminal terminal-result)
-    (set-continuation-max-bytes! 'make-terminal pointer continuation-max-bytes)
+    (prepare pointer)
     (set! effects-state (ghostty-racket-terminal-effects-new))
     (unless effects-state
-      (error 'make-terminal "could not allocate terminal effect state"))
-    (check-ghostty-result 'make-terminal
-                          (ghostty-racket-terminal-effects-attach pointer effects-state))
+      (error who "could not allocate terminal effect state"))
+    (check-ghostty-result who (ghostty-racket-terminal-effects-attach pointer effects-state))
     (define-values (state-result new-state) (ghostty-render-state-new))
     (set! render-state new-state)
-    (check-ghostty-result 'make-terminal state-result)
+    (check-ghostty-result who state-result)
     (define-values (row-result new-row-iterator) (ghostty-render-state-row-iterator-new))
     (set! row-iterator new-row-iterator)
-    (check-ghostty-result 'make-terminal row-result)
+    (check-ghostty-result who row-result)
     (define-values (cells-result new-row-cells) (ghostty-render-state-row-cells-new))
     (set! row-cells new-row-cells)
-    (check-ghostty-result 'make-terminal cells-result)
+    (check-ghostty-result who cells-result)
     (define value
       (terminal (box pointer)
                 (make-semaphore 1)
@@ -150,6 +148,19 @@
                 (make-hasheq)))
     (register-finalizer value release-terminal!)
     value))
+
+(define (make-terminal columns rows #:continuation-max-bytes [continuation-max-bytes 0])
+  (check-libghostty-abi!)
+  (define-values (result pointer) (ghostty-terminal-new #f columns rows))
+  (unless (= result GHOSTTY-SUCCESS)
+    (when pointer
+      (ghostty-terminal-free pointer))
+    (check-ghostty-result 'make-terminal result))
+  (adopt-terminal-pointer
+   'make-terminal
+   pointer
+   (lambda (native-pointer)
+     (set-continuation-max-bytes! 'make-terminal native-pointer continuation-max-bytes))))
 
 (define (call-with-terminal-pointer who value procedure)
   (call-with-terminal-lock
@@ -297,6 +308,80 @@
 
 (define (terminal-continuation-bytes value)
   (call-with-terminal-pointer 'terminal-continuation-bytes value copy-continuation-bytes))
+
+(define (terminal-snapshot-bytes value)
+  (call-with-terminal-pointer
+   'terminal-snapshot-bytes
+   value
+   (lambda (pointer)
+     (define output #f)
+     (define length 0)
+     (dynamic-wind void
+                   (lambda ()
+                     (define-values (result new-output new-length)
+                       (ghostty-snapshot-encode-alloc pointer #f))
+                     (set! output new-output)
+                     (set! length new-length)
+                     (check-ghostty-result 'terminal-snapshot-bytes result)
+                     (when (and (positive? length) (not output))
+                       (error 'terminal-snapshot-bytes
+                              "native snapshot supplied a null pointer with a positive length"))
+                     (define copied (make-bytes length))
+                     (when (positive? length)
+                       (memcpy copied output length))
+                     (bytes->immutable-bytes copied))
+                   (lambda () (ghostty-free #f output length))))))
+
+(define (decode-snapshot-pointer input max-continuation-bytes)
+  (define length (bytes-length input))
+  (define source #f)
+  (define decoder #f)
+  (define decoded #f)
+  (define transferred? #f)
+  (dynamic-wind
+   void
+   (lambda ()
+     (when (positive? length)
+       (set! source (ghostty-alloc #f length))
+       (unless source
+         (check-ghostty-result 'snapshot-bytes->terminal GHOSTTY-OUT-OF-MEMORY))
+       (memcpy source input length))
+     (define-values (new-result new-decoder) (ghostty-snapshot-decoder-new-buf #f source length))
+     (set! decoder new-decoder)
+     (check-ghostty-result 'snapshot-bytes->terminal new-result)
+     (unless decoder
+       (error 'snapshot-bytes->terminal "native decoder returned a null handle"))
+     (when max-continuation-bytes
+       (define limit (malloc _size 'atomic))
+       (ptr-set! limit _size max-continuation-bytes)
+       (check-ghostty-result
+        'snapshot-bytes->terminal
+        (ghostty-snapshot-decoder-set decoder snapshot-decoder-max-continuation-bytes-option limit)))
+     (define-values (decode-result new-terminal) (ghostty-snapshot-decoder-decode decoder))
+     (set! decoded new-terminal)
+     (check-ghostty-result 'snapshot-bytes->terminal decode-result)
+     (unless decoded
+       (error 'snapshot-bytes->terminal "native decoder returned a null terminal"))
+     (define offset (malloc _size 'atomic))
+     (ptr-set! offset _size 0)
+     (check-ghostty-result
+      'snapshot-bytes->terminal
+      (ghostty-snapshot-decoder-get decoder snapshot-decoder-source-offset-data offset))
+     (unless (= (ptr-ref offset _size) length)
+       (check-ghostty-result 'snapshot-bytes->terminal GHOSTTY-INVALID-VALUE))
+     (set! transferred? #t)
+     decoded)
+   (lambda ()
+     (when decoder
+       (ghostty-snapshot-decoder-free decoder))
+     (when (and decoded (not transferred?))
+       (ghostty-terminal-free decoded))
+     (ghostty-free #f source length))))
+
+(define (snapshot-bytes->terminal input #:max-continuation-bytes [max-continuation-bytes #f])
+  (check-libghostty-abi!)
+  (adopt-terminal-pointer 'snapshot-bytes->terminal
+                          (decode-snapshot-pointer input max-continuation-bytes)))
 
 (define (copy-effect-bytes pointer length)
   (define output (make-bytes length))

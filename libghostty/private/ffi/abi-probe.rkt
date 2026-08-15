@@ -19,6 +19,7 @@
          ghostty-racket-mouse-encoder-option-size
          ghostty-racket-size-report-style-size
          ghostty-racket-terminal-continuation-abi-check
+         ghostty-racket-snapshot-abi-check
          ghostty-racket-render-state-row-selection-size
          ghostty-racket-render-state-row-selection-align
          ghostty-racket-render-state-row-selection-start-x-offset
@@ -65,6 +66,10 @@
 (define-ghostty-abi ghostty-racket-terminal-continuation-abi-check
                     (_fun -> _bool)
                     #:c-id ghostty_racket_terminal_continuation_abi_check)
+
+(define-ghostty-abi ghostty-racket-snapshot-abi-check
+                    (_fun -> _bool)
+                    #:c-id ghostty_racket_snapshot_abi_check)
 
 (define-ghostty-abi ghostty-racket-render-state-row-selection-size
                     (_fun -> _size)
