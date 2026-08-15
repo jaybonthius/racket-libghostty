@@ -59,7 +59,7 @@
            (-> terminal? (integer-in 0 18446744073709551615) void?)]
           [terminal-continuation-bytes (-> terminal? (and/c bytes? immutable?))]
           [terminal-vt-ground? (-> terminal? boolean?)]
-          [terminal-snapshot-bytes (-> terminal? (and/c bytes? immutable?))]
+          [terminal->snapshot-bytes (-> terminal? (and/c bytes? immutable?))]
           [snapshot-bytes->terminal
            (->* [bytes?]
                 [#:max-continuation-bytes (or/c #f (integer-in 0 18446744073709551615))]
