@@ -3,7 +3,10 @@
 (require datastar
          json
          libghostty
+         net/base64
          racket/async-channel
+         racket/class
+         racket/draw
          racket/file
          racket/match
          racket/runtime-path
@@ -29,10 +32,12 @@
 
 (define terminal-columns 80)
 (define terminal-rows 24)
+(define terminal-cell-width-px 10)
+(define terminal-cell-height-px 20)
 (define workflow-marker "PTY_WORKFLOW_OK 界 é 👩‍💻")
 
 (define terminal-stylesheet
-  ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap}.terminal-row{display:block;block-size:1lh;line-height:1}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:1ch;min-inline-size:1ch;block-size:1lh;line-height:1;overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:2ch;min-inline-size:2ch}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}")
+  ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;position:relative;overflow:hidden}.terminal-row{display:block;block-size:1lh;line-height:1}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:1ch;min-inline-size:1ch;block-size:1lh;line-height:1;overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:2ch;min-inline-size:2ch}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}.kitty-image.above-text{position:absolute;z-index:1;pointer-events:none}")
 
 (struct browser-session
         (terminal key-encoder
@@ -128,8 +133,14 @@
 
 (define (make-browser-session)
   (define terminal (make-terminal terminal-columns terminal-rows))
+  (terminal-resize! terminal
+                    terminal-columns
+                    terminal-rows
+                    #:cell-width-px terminal-cell-width-px
+                    #:cell-height-px terminal-cell-height-px)
   (define key-encoder (make-key-encoder))
-  (define geometry (mouse-encoder-size 800 480 10 20 0 0 0 0))
+  (define geometry
+    (mouse-encoder-size 800 480 terminal-cell-width-px terminal-cell-height-px 0 0 0 0))
   (define mouse-encoder (make-mouse-encoder #:size geometry))
   (define pending-pty-replies (box '()))
   (define pending-bells (box 0))
@@ -155,7 +166,7 @@
         "/bin/sh"
         "-c"
         (format
-         "if exec 3<>/dev/tty; then stty raw -echo <&3; printf '\\033[?2004$p' >&3; reply=$(dd bs=1 count=11 <&3 2>/dev/null); stty sane <&3; if [ \"$reply\" != \"$(printf '\\033[?2004;2$y')\" ]; then exit 71; fi; printf '\\033[?1h\\033[?1000h\\033[?1006h\\033[?2004h\\a'; sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
+         "if exec 3<>/dev/tty; then stty raw -echo <&3; printf '\\033[?2004$p' >&3; reply=$(dd bs=1 count=11 <&3 2>/dev/null); stty sane <&3; if [ \"$reply\" != \"$(printf '\\033[?2004;2$y')\" ]; then exit 71; fi; printf '\\033[?1h\\033[?1000h\\033[?1006h\\033[?2004h\\a'; printf '\\033_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=2,r=1,q=1;////////\\033\\\\'; sleep 1; printf '\\033[1;38;2;60;220;120m~a\\033[0m\\n'; else exit 70; fi"
          workflow-marker)))))
   (define session
     (browser-session terminal
@@ -605,6 +616,118 @@
 (define (rgb-css color)
   (format "rgb(~a ~a ~a)" (color-rgb-red color) (color-rgb-green color) (color-rgb-blue color)))
 
+(define (image-bytes-per-pixel format)
+  (case format
+    [(rgb) 3]
+    [(rgba) 4]
+    [(gray-alpha) 2]
+    [(gray) 1]))
+
+(define (image-source->argb image source)
+  (define pixels (kitty-graphics-image-pixels image))
+  (define image-width (kitty-graphics-image-width image))
+  (define image-height (kitty-graphics-image-height image))
+  (define format (kitty-graphics-image-format image))
+  (define bytes-per-pixel (image-bytes-per-pixel format))
+  (define expected-length (* image-width image-height bytes-per-pixel))
+  (unless (and pixels
+               (= expected-length (kitty-graphics-image-data-length image))
+               (= expected-length (bytes-length pixels)))
+    (error 'render-snapshot-xexpr "copied Kitty image has inconsistent pixel storage"))
+  (define source-x (kitty-graphics-source-rectangle-x source))
+  (define source-y (kitty-graphics-source-rectangle-y source))
+  (define source-width (kitty-graphics-source-rectangle-width source))
+  (define source-height (kitty-graphics-source-rectangle-height source))
+  (unless (and (<= (+ source-x source-width) image-width)
+               (<= (+ source-y source-height) image-height))
+    (error 'render-snapshot-xexpr "copied Kitty source rectangle exceeds its image"))
+  (define argb (make-bytes (* source-width source-height 4)))
+  (for* ([row (in-range source-height)]
+         [column (in-range source-width)])
+    (define source-index (* (+ (* (+ source-y row) image-width) source-x column) bytes-per-pixel))
+    (define target-index (* (+ (* row source-width) column) 4))
+    (define-values (alpha red green blue)
+      (case format
+        [(rgb)
+         (values 255
+                 (bytes-ref pixels source-index)
+                 (bytes-ref pixels (+ source-index 1))
+                 (bytes-ref pixels (+ source-index 2)))]
+        [(rgba)
+         (values (bytes-ref pixels (+ source-index 3))
+                 (bytes-ref pixels source-index)
+                 (bytes-ref pixels (+ source-index 1))
+                 (bytes-ref pixels (+ source-index 2)))]
+        [(gray-alpha)
+         (define gray (bytes-ref pixels source-index))
+         (values (bytes-ref pixels (+ source-index 1)) gray gray gray)]
+        [(gray)
+         (define gray (bytes-ref pixels source-index))
+         (values 255 gray gray gray)]))
+    (bytes-set! argb target-index alpha)
+    (bytes-set! argb (+ target-index 1) red)
+    (bytes-set! argb (+ target-index 2) green)
+    (bytes-set! argb (+ target-index 3) blue))
+  argb)
+
+(define (image-png-data-url image source)
+  (define width (kitty-graphics-source-rectangle-width source))
+  (define height (kitty-graphics-source-rectangle-height source))
+  (define bitmap (make-bitmap width height))
+  (send bitmap set-argb-pixels 0 0 width height (image-source->argb image source))
+  (define output (open-output-bytes))
+  (unless (send bitmap save-file output 'png)
+    (error 'render-snapshot-xexpr "could not encode copied Kitty pixels as PNG"))
+  (string-append "data:image/png;base64,"
+                 (bytes->string/utf-8 (base64-encode (get-output-bytes output) #""))))
+
+(define (kitty-placement-xexpr placement images cell-width-px cell-height-px)
+  (define info (kitty-graphics-placement-render-info placement))
+  (define viewport (kitty-graphics-render-info-viewport info))
+  (define image (hash-ref images (kitty-graphics-placement-image-id placement)))
+  (define source (kitty-graphics-render-info-source-rectangle info))
+  (and
+   (eq? (kitty-graphics-placement-layer placement) 'above-text)
+   (not (kitty-graphics-placement-virtual? placement))
+   viewport
+   (kitty-graphics-image-pixels image)
+   (positive? (kitty-graphics-source-rectangle-width source))
+   (positive? (kitty-graphics-source-rectangle-height source))
+   (positive? (kitty-graphics-render-info-pixel-width info))
+   (positive? (kitty-graphics-render-info-pixel-height info))
+   `(img ((class "kitty-image above-text")
+          (alt "")
+          (data-image-id ,(number->string (kitty-graphics-placement-image-id placement)))
+          (data-placement-id ,(number->string (kitty-graphics-placement-placement-id placement)))
+          (data-z ,(number->string (kitty-graphics-placement-z placement)))
+          (data-viewport-column ,(number->string (kitty-graphics-viewport-position-column viewport)))
+          (data-viewport-row ,(number->string (kitty-graphics-viewport-position-row viewport)))
+          (data-source-x ,(number->string (kitty-graphics-source-rectangle-x source)))
+          (data-source-y ,(number->string (kitty-graphics-source-rectangle-y source)))
+          (data-source-width ,(number->string (kitty-graphics-source-rectangle-width source)))
+          (data-source-height ,(number->string (kitty-graphics-source-rectangle-height source)))
+          (data-pixel-width ,(number->string (kitty-graphics-render-info-pixel-width info)))
+          (data-pixel-height ,(number->string (kitty-graphics-render-info-pixel-height info)))
+          (draggable "false")
+          (src ,(image-png-data-url image source))
+          (style ,(format "left:~apx;top:~apx;width:~apx;height:~apx"
+                          (+ (* (kitty-graphics-viewport-position-column viewport) cell-width-px)
+                             (kitty-graphics-placement-x-offset placement))
+                          (+ (* (kitty-graphics-viewport-position-row viewport) cell-height-px)
+                             (kitty-graphics-placement-y-offset placement))
+                          (kitty-graphics-render-info-pixel-width info)
+                          (kitty-graphics-render-info-pixel-height info)))))))
+
+(define (kitty-images-xexprs graphics cell-width-px cell-height-px)
+  (if graphics
+      (filter values
+              (for/list ([placement (in-vector (kitty-graphics-snapshot-placements graphics))])
+                (kitty-placement-xexpr placement
+                                       (kitty-graphics-snapshot-images graphics)
+                                       cell-width-px
+                                       cell-height-px)))
+      '()))
+
 (define (cell-style-css cell colors)
   (define style (render-cell-style cell))
   (define foreground (or (render-cell-resolved-foreground cell) (render-colors-foreground colors)))
@@ -666,7 +789,9 @@
                      #:unless (eq? (render-cell-wide cell) 'spacer-tail))
             (cell-xexpr cell colors cursor))))
 
-(define (render-snapshot-xexpr snapshot)
+(define (render-snapshot-xexpr snapshot
+                               #:cell-width-px [cell-width-px terminal-cell-width-px]
+                               #:cell-height-px [cell-height-px terminal-cell-height-px])
   (define colors (render-snapshot-colors snapshot))
   (define cursor (render-snapshot-cursor snapshot))
   (define viewport (render-cursor-viewport cursor))
@@ -687,10 +812,17 @@
             (h2 "Immutable render snapshot PTY workflow")
             (div ((id "terminal-output") (class "terminal-viewport"))
                  ,@(for/list ([row (in-vector (render-snapshot-row-data snapshot))])
-                     (row-xexpr row colors cursor)))))
+                     (row-xexpr row colors cursor))
+                 ,@(kitty-images-xexprs (render-snapshot-kitty-graphics snapshot)
+                                        cell-width-px
+                                        cell-height-px))))
 
 (define (terminal-xexpr session)
-  (define rendered (render-snapshot-xexpr (browser-session-snapshot session)))
+  (define geometry (unbox (browser-session-geometry session)))
+  (define rendered
+    (render-snapshot-xexpr (browser-session-snapshot session)
+                           #:cell-width-px (mouse-encoder-size-cell-width geometry)
+                           #:cell-height-px (mouse-encoder-size-cell-height geometry)))
   (define attributes (cadr rendered))
   (define extended
     (append attributes

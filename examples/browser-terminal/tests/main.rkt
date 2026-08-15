@@ -3,8 +3,11 @@
 (require browser-terminal/app
          json
          libghostty
+         net/base64
          net/http-client
          net/url
+         racket/class
+         racket/draw
          racket/file
          racket/path
          racket/port
@@ -134,14 +137,67 @@
                        (test-cell 2 'narrow 1 "" #:background (color-rgb 1 2 3) #:selected? #t)
                        (test-cell 3 'spacer-head 0 "ignored")))))
 
-(define (test-snapshot cursor-x wide-tail?)
+(define (test-snapshot cursor-x wide-tail? [graphics #f])
   (render-snapshot 4
                    1
                    'full
                    test-colors
                    (render-cursor 'block #t #f #f (render-viewport cursor-x 0 wide-tail?))
                    (vector->immutable-vector (vector test-row))
-                   #f))
+                   graphics))
+
+(define (test-kitty-image id format width height pixels)
+  (define immutable-pixels (and pixels (bytes->immutable-bytes pixels)))
+  (kitty-graphics-image id
+                        0
+                        width
+                        height
+                        format
+                        id
+                        (case format
+                          [(rgb) (* width height 3)]
+                          [(rgba) (* width height 4)]
+                          [(gray-alpha) (* width height 2)]
+                          [(gray) (* width height)])
+                        immutable-pixels))
+
+(define (test-kitty-placement image-id
+                              #:placement-id [placement-id image-id]
+                              #:virtual? [virtual? #f]
+                              #:layer [layer 'above-text]
+                              #:viewport [viewport (kitty-graphics-viewport-position 2 3)]
+                              #:source [source (kitty-graphics-source-rectangle 0 0 1 1)]
+                              #:x-offset [x-offset 4]
+                              #:y-offset [y-offset 5]
+                              #:pixel-width [pixel-width 10]
+                              #:pixel-height [pixel-height 20])
+  (kitty-graphics-placement image-id
+                            placement-id
+                            virtual?
+                            x-offset
+                            y-offset
+                            (if (eq? layer 'above-text) 0 -1)
+                            layer
+                            (kitty-graphics-render-info pixel-width pixel-height 1 1 viewport source)
+                            #f))
+
+(define (test-kitty-graphics placements images)
+  (kitty-graphics-snapshot 1
+                           (vector->immutable-vector (list->vector placements))
+                           (make-immutable-hash (for/list ([image (in-list images)])
+                                                  (cons (kitty-graphics-image-id image) image)))))
+
+(define (html-png-bytes html)
+  (define match (regexp-match #px"src=\"data:image/png;base64,([^\"]+)\"" html))
+  (unless match
+    (error 'html-png-bytes "PNG data URL was not present"))
+  (base64-decode (string->bytes/utf-8 (cadr match))))
+
+(define (png-argb png [x 0] [y 0])
+  (define bitmap (read-bitmap (open-input-bytes png) 'png/alpha))
+  (define pixels (make-bytes 4))
+  (send bitmap get-argb-pixels x y 1 1 pixels)
+  (values (send bitmap get-width) (send bitmap get-height) (bytes->list pixels)))
 
 (test-case "snapshot xexpr preserves cell geometry and wide-tail cursor policy"
   (define wide-tail-html (xexpr->string (render-snapshot-xexpr (test-snapshot 1 #t))))
@@ -157,6 +213,57 @@
   (check-true (string-contains? empty-cursor-html
                                 "class=\"terminal-cell placeholder selected cursor narrow\"")))
 
+(test-case "copied Kitty formats crop and encode exact PNG pixels"
+  (for ([format-case (in-list (list (list 'rgb (bytes 1 2 3 10 20 30) '(255 10 20 30))
+                                    (list 'rgba (bytes 1 2 3 4 10 20 30 128) '(128 10 20 30))
+                                    (list 'gray-alpha (bytes 1 2 50 128) '(128 50 50 50))
+                                    (list 'gray (bytes 1 70) '(255 70 70 70))))])
+    (define format (car format-case))
+    (define image (test-kitty-image 1 format 2 1 (cadr format-case)))
+    (define placement
+      (test-kitty-placement 1
+                            #:source (kitty-graphics-source-rectangle 1 0 1 1)
+                            #:pixel-width 13
+                            #:pixel-height 17))
+    (define html
+      (xexpr->string (render-snapshot-xexpr
+                      (test-snapshot 0 #f (test-kitty-graphics (list placement) (list image))))))
+    (check-true (string-contains? html "class=\"kitty-image above-text\""))
+    (check-true (string-contains? html "data-source-x=\"1\""))
+    (check-true (string-contains? html "style=\"left:24px;top:65px;width:13px;height:17px\""))
+    (define-values (width height argb) (png-argb (html-png-bytes html)))
+    (check-equal? width 1)
+    (check-equal? height 1)
+    (check-equal? argb (caddr format-case)))
+  (define image (test-kitty-image 1 'rgb 1 1 (bytes 1 2 3)))
+  (define invalid-placement
+    (test-kitty-placement 1 #:source (kitty-graphics-source-rectangle 1 0 1 1)))
+  (check-exn #rx"source rectangle exceeds"
+             (lambda ()
+               (render-snapshot-xexpr
+                (test-snapshot 0 #f (test-kitty-graphics (list invalid-placement) (list image)))))))
+
+(test-case "browser emits only visible nonvirtual above-text Kitty placements"
+  (define images
+    (list (test-kitty-image 1 'rgb 1 1 (bytes 10 20 30))
+          (test-kitty-image 2 'rgb 1 1 (bytes 20 30 40))
+          (test-kitty-image 3 'rgb 1 1 (bytes 30 40 50))
+          (test-kitty-image 4 'rgb 1 1 (bytes 40 50 60))
+          (test-kitty-image 5 'rgb 1 1 #f)))
+  (define placements
+    (list (test-kitty-placement 1)
+          (test-kitty-placement 2 #:layer 'below-text)
+          (test-kitty-placement 3 #:virtual? #t #:viewport #f)
+          (test-kitty-placement 4 #:viewport #f)
+          (test-kitty-placement 5)))
+  (define html
+    (xexpr->string (render-snapshot-xexpr
+                    (test-snapshot 0 #f (test-kitty-graphics placements images)))))
+  (check-equal? (length (regexp-match* #rx"<img " html)) 1)
+  (check-true (string-contains? html "data-image-id=\"1\""))
+  (for ([image-id (in-list '(2 3 4 5))])
+    (check-false (string-contains? html (format "data-image-id=\"~a\"" image-id)))))
+
 (test-case "browser adapter sends facts only"
   (define source
     (file->string (build-path (path-only (collection-file-path "app.rkt" "browser-terminal"))
@@ -171,7 +278,11 @@
                             "1006"
                             "bracketed"
                             "alternate-scroll"
-                            "clamp")])
+                            "clamp"
+                            "kitty"
+                            "canvas"
+                            "base64"
+                            "data:image")])
     (check-false (string-contains? source policy))))
 
 (test-case "server command handler preserves order and routes native input"
@@ -354,8 +465,10 @@
        (check-true (string-contains? page ".terminal-cell.wide{inline-size:2ch"))
        (check-true (string-contains? page ".terminal-cell.selected{background-image:"))
        (check-true (string-contains? page ".terminal-cell.cursor{box-shadow:"))
+       (check-true (string-contains? page "position:relative;overflow:hidden"))
+       (check-true (string-contains? page ".kitty-image.above-text{position:absolute"))
        (browser-session-wait session 10)
-       (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK 界 é 👩‍💻")
+       (check-equal? (browser-session-output session) "  PTY_WORKFLOW_OK 界 é 👩‍💻")
        (check-equal? (browser-session-pty-replies session)
                      (vector->immutable-vector (vector #"\33[?2004;2$y")))
        (check-equal? (browser-session-bell-count session) 1)
@@ -364,12 +477,34 @@
                      (for/or ([cell (in-vector (render-row-cells row))])
                        (and (equal? (render-cell-grapheme cell) "界")
                             (= (render-cell-width cell) 2)))))
+       (define graphics (render-snapshot-kitty-graphics snapshot))
+       (check-true (kitty-graphics-snapshot? graphics))
+       (check-equal? (vector-length (kitty-graphics-snapshot-placements graphics)) 1)
+       (define placement (vector-ref (kitty-graphics-snapshot-placements graphics) 0))
+       (define image (hash-ref (kitty-graphics-snapshot-images graphics) 1))
+       (check-eq? (kitty-graphics-placement-layer placement) 'above-text)
+       (check-false (kitty-graphics-placement-virtual? placement))
+       (check-equal? (kitty-graphics-image-format image) 'rgb)
+       (check-equal? (kitty-graphics-image-pixels image) #"\377\377\377\377\377\377")
+       (define rendered-page (bounded-http-get port "/"))
+       (check-true (string-contains? rendered-page "class=\"kitty-image above-text\""))
+       (check-true (string-contains? rendered-page "data-image-id=\"1\""))
+       (check-true (string-contains? rendered-page "data-pixel-width=\"20\""))
+       (check-true (string-contains? rendered-page "data-pixel-height=\"20\""))
+       (check-true (string-contains? rendered-page
+                                     "style=\"left:0px;top:0px;width:20px;height:20px\""))
+       (define-values (png-width png-height argb) (png-argb (html-png-bytes rendered-page)))
+       (check-equal? png-width 1)
+       (check-equal? png-height 2)
+       (check-equal? argb '(255 255 255 255))
        (define events (receive-with-timeout 'sse-read sse-result 5))
        (check-true (>= (length (regexp-match* #rx"event: datastar-patch-elements" events)) 2))
        (check-true (string-contains? events ">P</span>"))
        (check-true (string-contains? events "terminal-cell"))
        (check-true (string-contains? events "data-width=\"2\""))
        (check-true (string-contains? events "font-weight:bold"))
+       (check-true (string-contains? events "class=\"kitty-image above-text\""))
+       (check-true (string-contains? events "data:image/png;base64,"))
        (check-true (string-contains? events "data-pty-reply-count=\"1\""))
        (check-true (string-contains? events "data-bell-count=\"1\""))))
    (lambda ()
