@@ -6,7 +6,13 @@
          ffi/unsafe/define
          racket/runtime-path)
 
-(provide ghostty-racket-sgr-unknown-size
+(provide ghostty-racket-render-state-row-selection-size
+         ghostty-racket-render-state-row-selection-align
+         ghostty-racket-render-state-row-selection-start-x-offset
+         ghostty-racket-render-state-row-selection-end-x-offset
+         ghostty-racket-style-color-value-size
+         ghostty-racket-style-color-value-align
+         ghostty-racket-sgr-unknown-size
          ghostty-racket-sgr-unknown-align
          ghostty-racket-sgr-unknown-full-ptr-offset
          ghostty-racket-sgr-unknown-full-len-offset
@@ -26,6 +32,25 @@
 
 (define-runtime-path libghostty-vt-abi.so '(so "libghostty-vt-abi"))
 (define-ffi-definer define-ghostty-abi (ffi-lib libghostty-vt-abi.so))
+
+(define-ghostty-abi ghostty-racket-render-state-row-selection-size
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_render_state_row_selection_size)
+(define-ghostty-abi ghostty-racket-render-state-row-selection-align
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_render_state_row_selection_align)
+(define-ghostty-abi ghostty-racket-render-state-row-selection-start-x-offset
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_render_state_row_selection_start_x_offset)
+(define-ghostty-abi ghostty-racket-render-state-row-selection-end-x-offset
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_render_state_row_selection_end_x_offset)
+(define-ghostty-abi ghostty-racket-style-color-value-size
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_style_color_value_size)
+(define-ghostty-abi ghostty-racket-style-color-value-align
+                    (_fun -> _size)
+                    #:c-id ghostty_racket_style_color_value_align)
 
 (define-ghostty-abi ghostty-racket-sgr-unknown-size
                     (_fun -> _size)

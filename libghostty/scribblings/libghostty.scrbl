@@ -86,6 +86,32 @@ Formats the current active screen as UTF-8 plain text. Styling escape sequences 
 The operation creates a native formatter that borrows @racket[terminal], copies the formatter output into Racket memory, and releases both the output allocation and formatter before returning. The borrowed formatter is never exposed.
 }
 
+@section{Immutable Render Snapshots}
+
+@defproc[(terminal-render-snapshot [terminal terminal?]) render-snapshot?]{Updates the persistent private render state owned by @racket[terminal], copies the entire viewport, and returns an immutable snapshot. The operation serializes update, traversal, copying, and dirty acknowledgement with every other operation on the terminal. Native render handles, row iterators, cell iterators, raw cells, and raw rows never cross the public boundary.
+
+The first snapshot is normally @racket['full]. A successful snapshot acknowledges both global and row dirty flags, so an unchanged next snapshot is @racket['clean]; terminal writes normally produce @racket['partial], and resize produces @racket['full]. Dirty flags are not acknowledged if update or copying raises. Native @racket['no-value] row selections and @racket['invalid-value] unresolved cell colors become @racket[#f]. Grapheme UTF-8 buffer sizing and retry remain private.
+
+Every nested struct is an immutable Racket value, every palette, row, and cell vector is immutable, and every grapheme string is copied and immutable. A returned snapshot remains valid after later writes, updates, reset, resize, or close. Calling this operation after close raises @racket[exn:fail:ghostty:closed?].}
+
+@defstruct*[render-snapshot ([columns exact-nonnegative-integer?] [rows exact-nonnegative-integer?] [dirty (or/c 'clean 'partial 'full)] [colors render-colors?] [cursor render-cursor?] [row-data vector?])]{A complete coordinate-stable viewport. @racket[row-data] has exactly @racket[rows] entries, and each row has exactly @racket[columns] cells, including wide-character spacer cells.}
+
+@defstruct*[render-colors ([background color-rgb?] [foreground color-rgb?] [cursor (or/c #f color-rgb?)] [palette vector?])]{Default colors, optional explicit cursor color, and the copied immutable 256-color palette.}
+
+@defstruct*[render-cursor ([style (or/c 'bar 'block 'underline 'hollow-block)] [visible? boolean?] [blinking? boolean?] [password-input? boolean?] [viewport (or/c #f render-viewport?)])]{Cursor rendering state. A missing viewport means its coordinates are undefined.}
+
+@defstruct*[render-viewport ([x exact-nonnegative-integer?] [y exact-nonnegative-integer?] [wide-tail? boolean?])]{Cursor viewport coordinates and whether the cursor is on a wide-character tail.}
+
+@defstruct*[render-row ([y exact-nonnegative-integer?] [dirty? boolean?] [wrap? boolean?] [wrap-continuation? boolean?] [grapheme? boolean?] [styled? boolean?] [hyperlink? boolean?] [semantic-prompt (or/c 'none 'prompt 'prompt-continuation)] [kitty-virtual-placeholder? boolean?] [selection (or/c #f render-selection-range?)] [cells vector?])]{Copied row metadata and cells. Selection bounds are inclusive.}
+
+@defstruct*[render-selection-range ([start-x exact-nonnegative-integer?] [end-x exact-nonnegative-integer?])]{An inclusive row-local selected range.}
+
+@defstruct*[render-cell ([x exact-nonnegative-integer?] [y exact-nonnegative-integer?] [codepoint exact-nonnegative-integer?] [grapheme string?] [grapheme-count exact-nonnegative-integer?] [width (integer-in 0 2)] [wide (or/c 'narrow 'wide 'spacer-tail 'spacer-head)] [content symbol?] [has-text? boolean?] [has-styling? boolean?] [style-id exact-nonnegative-integer?] [hyperlink? boolean?] [protected? boolean?] [semantic-content (or/c 'output 'input 'prompt)] [content-color (or/c #f render-style-color?)] [style render-style?] [resolved-background (or/c #f color-rgb?)] [resolved-foreground (or/c #f color-rgb?)] [selected? boolean?])]{One cell at an explicit coordinate. Width is two for a wide head, zero for spacer cells, and one otherwise. @racket[content-color] preserves palette versus RGB background-only content; resolved colors flatten native palette and RGB sources and are absent when the renderer should use defaults.}
+
+@defstruct*[render-style ([foreground render-style-color?] [background render-style-color?] [underline-color render-style-color?] [bold? boolean?] [italic? boolean?] [faint? boolean?] [blink? boolean?] [inverse? boolean?] [invisible? boolean?] [strikethrough? boolean?] [overline? boolean?] [underline (or/c 'none 'single 'double 'curly 'dotted 'dashed)])]{The complete copied cell style.}
+
+@defstruct*[render-style-color ([source (or/c 'none 'palette 'rgb)] [value (or/c #f exact-nonnegative-integer? color-rgb?)])]{A style color that preserves whether the native value is unset, palette-indexed, or direct RGB.}
+
 @section{Colors and Palettes}
 
 @defstruct*[color-rgb ([red (integer-in 0 255)] [green (integer-in 0 255)] [blue (integer-in 0 255)])]{An immutable RGB value.}

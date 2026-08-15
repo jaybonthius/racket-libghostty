@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require browser-terminal/app
+         libghostty
          net/url
          racket/port
          racket/string
@@ -83,13 +84,19 @@
        (check-true (string-contains? page "Native grapheme width"))
        (check-true (regexp-match? #rx"Native grapheme width[^<]*</dt>[^<]*<dd>2</dd>" page))
        (browser-session-wait session 10)
-       (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK")
-       (define events (receive-with-timeout 'sse-read sse-result 5))
-       (define marker-position (car (car (regexp-match-positions #rx"PTY_WORKFLOW_OK" events))))
-       (define events-before-marker (substring events 0 marker-position))
+       (check-equal? (browser-session-output session) "PTY_WORKFLOW_OK 界 é 👩‍💻")
+       (define snapshot (browser-session-snapshot session))
        (check-true
-        (>= (length (regexp-match* #rx"event: datastar-patch-elements" events-before-marker)) 2))
-       (check-true (string-contains? events "PTY_WORKFLOW_OK"))))
+        (for/or ([row (in-vector (render-snapshot-row-data snapshot))])
+          (for/or ([cell (in-vector (render-row-cells row))])
+            (and (equal? (render-cell-grapheme cell) "界") (= (render-cell-width cell) 2)))))
+       (define events (receive-with-timeout 'sse-read sse-result 5))
+       (check-true
+        (>= (length (regexp-match* #rx"event: datastar-patch-elements" events)) 2))
+       (check-true (string-contains? events ">P</span>"))
+       (check-true (string-contains? events "terminal-cell"))
+       (check-true (string-contains? events "data-width=\"2\""))
+       (check-true (string-contains? events "font-weight:bold"))))
    (lambda ()
      (when stop
        (with-handlers ([exn:fail? void])

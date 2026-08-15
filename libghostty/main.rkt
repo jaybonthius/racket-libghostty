@@ -7,6 +7,7 @@
          "private/color.rkt"
          "private/error.rkt"
          "private/parsers.rkt"
+         "private/render.rkt"
          "private/terminal.rkt"
          "private/utilities.rkt")
 
@@ -48,6 +49,77 @@
                 void?)]
           [terminal-write! (-> terminal? bytes? void?)]
           [terminal->plain-text (-> terminal? string?)]
+          [terminal-render-snapshot (-> terminal? render-snapshot?)]
+          (struct render-snapshot
+                  ([columns (integer-in 0 65535)]
+                   [rows (integer-in 0 65535)]
+                   [dirty (or/c 'clean 'partial 'full)]
+                   [colors render-colors?]
+                   [cursor render-cursor?]
+                   [row-data (and/c (vectorof render-row?) immutable?)]))
+          (struct render-colors
+                  ([background color-rgb?]
+                   [foreground color-rgb?]
+                   [cursor (or/c #f color-rgb?)]
+                   [palette (and/c vector? immutable?)]))
+          (struct render-cursor
+                  ([style (or/c 'bar 'block 'underline 'hollow-block)]
+                   [visible? boolean?]
+                   [blinking? boolean?]
+                   [password-input? boolean?]
+                   [viewport (or/c #f render-viewport?)]))
+          (struct render-viewport
+                  ([x (integer-in 0 65535)] [y (integer-in 0 65535)] [wide-tail? boolean?]))
+          (struct render-row
+                  ([y (integer-in 0 65535)]
+                   [dirty? boolean?]
+                   [wrap? boolean?]
+                   [wrap-continuation? boolean?]
+                   [grapheme? boolean?]
+                   [styled? boolean?]
+                   [hyperlink? boolean?]
+                   [semantic-prompt (or/c 'none 'prompt 'prompt-continuation)]
+                   [kitty-virtual-placeholder? boolean?]
+                   [selection (or/c #f render-selection-range?)]
+                   [cells (and/c (vectorof render-cell?) immutable?)]))
+          (struct render-selection-range
+                  ([start-x (integer-in 0 65535)] [end-x (integer-in 0 65535)]))
+          (struct render-cell
+                  ([x (integer-in 0 65535)]
+                   [y (integer-in 0 65535)]
+                   [codepoint (integer-in 0 4294967295)]
+                   [grapheme string?]
+                   [grapheme-count exact-nonnegative-integer?]
+                   [width (integer-in 0 2)]
+                   [wide (or/c 'narrow 'wide 'spacer-tail 'spacer-head)]
+                   [content (or/c 'codepoint 'grapheme 'background-palette 'background-rgb)]
+                   [has-text? boolean?]
+                   [has-styling? boolean?]
+                   [style-id (integer-in 0 65535)]
+                   [hyperlink? boolean?]
+                   [protected? boolean?]
+                   [semantic-content (or/c 'output 'input 'prompt)]
+                   [content-color (or/c #f render-style-color?)]
+                   [style render-style?]
+                   [resolved-background (or/c #f color-rgb?)]
+                   [resolved-foreground (or/c #f color-rgb?)]
+                   [selected? boolean?]))
+          (struct render-style
+                  ([foreground render-style-color?]
+                   [background render-style-color?]
+                   [underline-color render-style-color?]
+                   [bold? boolean?]
+                   [italic? boolean?]
+                   [faint? boolean?]
+                   [blink? boolean?]
+                   [inverse? boolean?]
+                   [invisible? boolean?]
+                   [strikethrough? boolean?]
+                   [overline? boolean?]
+                   [underline (or/c 'none 'single 'double 'curly 'dotted 'dashed)]))
+          (struct render-style-color
+                  ([source (or/c 'none 'palette 'rgb)]
+                   [value (or/c #f (integer-in 0 255) color-rgb?)]))
           (struct color-rgb
                   ([red (integer-in 0 255)] [green (integer-in 0 255)] [blue (integer-in 0 255)]))
           (struct x11-color ([name string?] [color color-rgb?]))

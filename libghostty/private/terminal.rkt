@@ -5,7 +5,10 @@
          "error.rkt"
          "ffi/common.rkt"
          "ffi/formatter.rkt"
-         "ffi/terminal.rkt")
+         "ffi/render.rkt"
+         "ffi/selection-test.rkt"
+         "ffi/terminal.rkt"
+         "render.rkt")
 
 (provide terminal?
          make-terminal
@@ -14,9 +17,11 @@
          terminal-reset!
          terminal-resize!
          terminal-write!
-         terminal->plain-text)
+         terminal->plain-text
+         terminal-render-snapshot
+         terminal-test-select-all!)
 
-(struct terminal (pointer lock) #:authentic)
+(struct terminal (pointer lock render-state row-iterator row-cells) #:authentic)
 
 (define (release-terminal! value)
   (define pointer-box (terminal-pointer value))
@@ -24,18 +29,48 @@
     (define pointer (unbox pointer-box))
     (when pointer
       (if (box-cas! pointer-box pointer #f)
-          (dynamic-wind void
-                        (lambda () (ghostty-terminal-free pointer))
-                        (lambda () (void/reference-sink value)))
+          (dynamic-wind
+           void
+           (lambda ()
+             (ghostty-render-state-row-cells-free (terminal-row-cells value))
+             (ghostty-render-state-row-iterator-free (terminal-row-iterator value))
+             (ghostty-render-state-free (terminal-render-state value))
+             (ghostty-terminal-free pointer))
+           (lambda () (void/reference-sink value)))
           (loop)))))
 
 (define (make-terminal columns rows)
   (check-libghostty-abi!)
-  (define-values (result pointer) (ghostty-terminal-new #f columns rows))
-  (check-ghostty-result 'make-terminal result)
-  (define value (terminal (box pointer) (make-semaphore 1)))
-  (register-finalizer value release-terminal!)
-  value)
+  (define pointer #f)
+  (define render-state #f)
+  (define row-iterator #f)
+  (define row-cells #f)
+  (with-handlers ([exn? (lambda (error)
+                          (when row-cells
+                            (ghostty-render-state-row-cells-free row-cells))
+                          (when row-iterator
+                            (ghostty-render-state-row-iterator-free row-iterator))
+                          (when render-state
+                            (ghostty-render-state-free render-state))
+                          (when pointer
+                            (ghostty-terminal-free pointer))
+                          (raise error))])
+    (define-values (terminal-result new-pointer) (ghostty-terminal-new #f columns rows))
+    (set! pointer new-pointer)
+    (check-ghostty-result 'make-terminal terminal-result)
+    (define-values (state-result new-state) (ghostty-render-state-new))
+    (set! render-state new-state)
+    (check-ghostty-result 'make-terminal state-result)
+    (define-values (row-result new-row-iterator) (ghostty-render-state-row-iterator-new))
+    (set! row-iterator new-row-iterator)
+    (check-ghostty-result 'make-terminal row-result)
+    (define-values (cells-result new-row-cells) (ghostty-render-state-row-cells-new))
+    (set! row-cells new-row-cells)
+    (check-ghostty-result 'make-terminal cells-result)
+    (define value
+      (terminal (box pointer) (make-semaphore 1) render-state row-iterator row-cells))
+    (register-finalizer value release-terminal!)
+    value))
 
 (define (call-with-terminal-pointer who value procedure)
   (call-with-semaphore
@@ -132,3 +167,26 @@
                    (lambda ()
                      (when formatter
                        (ghostty-formatter-free formatter)))))))
+
+(define (terminal-render-snapshot value)
+  (call-with-terminal-pointer
+   'terminal-render-snapshot
+   value
+   (lambda (pointer)
+     (copy-terminal-render-snapshot pointer
+                                    (terminal-render-state value)
+                                    (terminal-row-iterator value)
+                                    (terminal-row-cells value)))))
+
+(define (terminal-test-select-all! value)
+  (call-with-terminal-pointer
+   'terminal-test-select-all!
+   value
+   (lambda (pointer)
+     (define selection (malloc _GhosttySelection 'atomic))
+     (ptr-set! selection _size 0 (ctype-sizeof _GhosttySelection))
+     (check-ghostty-result 'terminal-test-select-all!
+                           (ghostty-terminal-select-all pointer selection))
+     (check-ghostty-result 'terminal-test-select-all!
+                           (ghostty-terminal-set pointer 21 selection))))
+  (void))

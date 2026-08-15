@@ -7,7 +7,10 @@
          "ffi/common.rkt"
          "ffi/device.rkt"
          "ffi/formatter.rkt"
-         "ffi/sgr.rkt")
+         "ffi/render.rkt"
+         "ffi/selection-test.rkt"
+         "ffi/sgr.rkt"
+         "ffi/style.rkt")
 
 (provide libghostty-type-layouts
          check-libghostty-abi!)
@@ -76,7 +79,45 @@
                (cons 'unwrap _stdbool)
                (cons 'trim _stdbool)
                (cons 'extra _GhosttyFormatterTerminalExtra)
-               (cons 'selection _pointer)))))
+               (cons 'selection _pointer)))
+   (list 'GhosttyRenderStateColors
+         _GhosttyRenderStateColors
+         (list (cons 'size _size)
+               (cons 'background _GhosttyColorRgb)
+               (cons 'foreground _GhosttyColorRgb)
+               (cons 'cursor _GhosttyColorRgb)
+               (cons 'cursor_has_value _stdbool)
+               (cons 'palette (_array _GhosttyColorRgb 256))))
+   (list 'GhosttyStyleColor
+         _GhosttyStyleColor
+         (list (cons 'tag _int) (cons 'value _GhosttyStyleColorValue)))
+   (list 'GhosttyStyle
+         _GhosttyStyle
+         (list (cons 'size _size)
+               (cons 'fg_color _GhosttyStyleColor)
+               (cons 'bg_color _GhosttyStyleColor)
+               (cons 'underline_color _GhosttyStyleColor)
+               (cons 'bold _stdbool)
+               (cons 'italic _stdbool)
+               (cons 'faint _stdbool)
+               (cons 'blink _stdbool)
+               (cons 'inverse _stdbool)
+               (cons 'invisible _stdbool)
+               (cons 'strikethrough _stdbool)
+               (cons 'overline _stdbool)
+               (cons 'underline _int)))
+   (list 'GhosttyGridRef
+         _GhosttyGridRef
+         (list (cons 'size _size)
+               (cons 'node _pointer)
+               (cons 'x _uint16)
+               (cons 'y _uint16)))
+   (list 'GhosttySelection
+         _GhosttySelection
+         (list (cons 'size _size)
+               (cons 'start _GhosttyGridRef)
+               (cons 'end _GhosttyGridRef)
+               (cons 'rectangle _stdbool)))))
 
 (define (align-offset offset alignment)
   (+ offset (modulo (- alignment (modulo offset alignment)) alignment)))
@@ -125,6 +166,34 @@
                         (format "field ~a offset" field-name)
                         (hash-ref offsets field-name)
                         (layout-ref native-field 'offset))))
+
+(define (check-probed-render-layouts)
+  (check-equal-layout 'GhosttyRenderStateRowSelection
+                      'size
+                      (ctype-sizeof _GhosttyRenderStateRowSelection)
+                      (ghostty-racket-render-state-row-selection-size))
+  (check-equal-layout 'GhosttyRenderStateRowSelection
+                      'alignment
+                      (ctype-alignof _GhosttyRenderStateRowSelection)
+                      (ghostty-racket-render-state-row-selection-align))
+  (define selection-offsets
+    (field-offsets (list (cons 'size _size) (cons 'start-x _uint16) (cons 'end-x _uint16))))
+  (check-equal-layout 'GhosttyRenderStateRowSelection
+                      "field start-x offset"
+                      (hash-ref selection-offsets 'start-x)
+                      (ghostty-racket-render-state-row-selection-start-x-offset))
+  (check-equal-layout 'GhosttyRenderStateRowSelection
+                      "field end-x offset"
+                      (hash-ref selection-offsets 'end-x)
+                      (ghostty-racket-render-state-row-selection-end-x-offset))
+  (check-equal-layout 'GhosttyStyleColorValue
+                      'size
+                      (ctype-sizeof _GhosttyStyleColorValue)
+                      (ghostty-racket-style-color-value-size))
+  (check-equal-layout 'GhosttyStyleColorValue
+                      'alignment
+                      (ctype-alignof _GhosttyStyleColorValue)
+                      (ghostty-racket-style-color-value-align)))
 
 (define (check-probed-sgr-layouts)
   (check-equal-layout 'GhosttySgrUnknown
@@ -207,6 +276,7 @@
 (define (check-libghostty-abi!)
   (unless abi-checked?
     (for-each check-declaration declarations)
+    (check-probed-render-layouts)
     (check-probed-sgr-layouts)
     (check-sgr-runtime-layout)
     (set! abi-checked? #t))
