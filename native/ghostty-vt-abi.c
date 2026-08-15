@@ -145,6 +145,7 @@ bool ghostty_racket_selection_abi_check(void) {
       offsetof(GhosttyTerminalSelectionFormatOptions, size) == 0 &&
       sizeof(GhosttyCell) == sizeof(uint64_t) &&
       sizeof(GhosttyRow) == sizeof(uint64_t) &&
+      sizeof(GhosttyStyleId) == sizeof(uint16_t) &&
       sizeof(GhosttyColorPaletteIndex) == sizeof(uint8_t) &&
       sizeof(GhosttyCellData) == 4 &&
       GHOSTTY_CELL_DATA_INVALID == 0 && GHOSTTY_CELL_DATA_CODEPOINT == 1 &&
