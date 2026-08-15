@@ -34,10 +34,23 @@
 (define terminal-rows 24)
 (define terminal-cell-width-px 10)
 (define terminal-cell-height-px 20)
+(define browser-kitty-image-storage-limit 1048576)
+(define browser-kitty-command-limit 1048576)
+(define browser-kitty-render-placement-limit 64)
+(define browser-kitty-render-source-pixel-limit 65536)
+(define browser-kitty-render-encoded-byte-limit 524288)
 (define workflow-marker "PTY_WORKFLOW_OK 界 é 👩‍💻")
 
+(define current-browser-terminal-test-hook (make-parameter #f))
+(define current-browser-kitty-render-placement-limit
+  (make-parameter browser-kitty-render-placement-limit))
+(define current-browser-kitty-render-source-pixel-limit
+  (make-parameter browser-kitty-render-source-pixel-limit))
+(define current-browser-kitty-render-encoded-byte-limit
+  (make-parameter browser-kitty-render-encoded-byte-limit))
+
 (define terminal-stylesheet
-  ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;position:relative;overflow:hidden}.terminal-row{display:block;block-size:1lh;line-height:1}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:1ch;min-inline-size:1ch;block-size:1lh;line-height:1;overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:2ch;min-inline-size:2ch}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}.kitty-image.above-text{position:absolute;z-index:1;pointer-events:none}")
+  ".terminal-viewport{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;position:relative;overflow:hidden}.terminal-row{display:block;block-size:var(--terminal-cell-height);line-height:var(--terminal-cell-height)}.terminal-cell{display:inline-block;box-sizing:border-box;inline-size:var(--terminal-cell-width);min-inline-size:var(--terminal-cell-width);block-size:var(--terminal-cell-height);line-height:var(--terminal-cell-height);overflow:hidden;vertical-align:top}.terminal-cell.wide{inline-size:calc(2 * var(--terminal-cell-width));min-inline-size:calc(2 * var(--terminal-cell-width))}.terminal-cell.selected{background-image:linear-gradient(rgb(128 160 255 / .35),rgb(128 160 255 / .35))}.terminal-cell.cursor{box-shadow:inset 0 0 0 2px currentColor}.kitty-image.above-text{position:absolute;z-index:1;pointer-events:none}")
 
 (struct browser-session
         (terminal key-encoder
@@ -62,6 +75,24 @@
   #:authentic)
 
 (define-runtime-path input-adapter.js "input-adapter.js")
+
+(define (run-browser-terminal-test-hook phase)
+  (define hook (current-browser-terminal-test-hook))
+  (when hook
+    (hook phase)))
+
+(define (call-with-browser-terminal-test-hook hook procedure)
+  (parameterize ([current-browser-terminal-test-hook hook])
+    (procedure)))
+
+(define (call-with-browser-kitty-render-limits placement-limit
+                                               source-pixel-limit
+                                               encoded-byte-limit
+                                               procedure)
+  (parameterize ([current-browser-kitty-render-placement-limit placement-limit]
+                 [current-browser-kitty-render-source-pixel-limit source-pixel-limit]
+                 [current-browser-kitty-render-encoded-byte-limit encoded-byte-limit])
+    (procedure)))
 
 (define (signal-change! session value)
   (async-channel-put (browser-session-changes session) value))
@@ -127,12 +158,18 @@
                             (exn:fail (format "PTY command exited with status ~a" status)
                                       (current-continuation-marks))))))
                 (lambda ()
-                  (with-handlers ([exn:fail? void])
-                    (close-input-port master))
-                  (finish-session! session failure))))
+                  (call-with-semaphore (browser-session-state-lock session)
+                                       (lambda ()
+                                         (with-handlers ([exn:fail? void])
+                                           (close-input-port master))
+                                         (finish-session! session failure))))))
 
 (define (make-browser-session)
-  (define terminal (make-terminal terminal-columns terminal-rows))
+  (define terminal
+    (make-terminal terminal-columns
+                   terminal-rows
+                   #:kitty-image-storage-limit browser-kitty-image-storage-limit
+                   #:kitty-graphics-max-bytes browser-kitty-command-limit))
   (terminal-resize! terminal
                     terminal-columns
                     terminal-rows
@@ -196,7 +233,8 @@
   (terminal->plain-text (browser-session-terminal session)))
 
 (define (browser-session-snapshot session)
-  (terminal-render-snapshot (browser-session-terminal session)))
+  (call-with-semaphore (browser-session-state-lock session)
+                       (lambda () (terminal-render-snapshot (browser-session-terminal session)))))
 
 (define (browser-session-pty-replies session)
   (vector->immutable-vector (list->vector (unbox (browser-session-pty-reply-log session)))))
@@ -498,16 +536,20 @@
                         padding-bottom
                         padding-right
                         padding-left))
-  (resize-pty! (browser-session-master session) columns rows screen-width screen-height)
+  (define finished? (session-finished? session))
+  (unless finished?
+    (resize-pty! (browser-session-master session) columns rows screen-width screen-height))
   (terminal-resize! (browser-session-terminal session)
                     columns
                     rows
                     #:cell-width-px cell-width
                     #:cell-height-px cell-height)
+  (run-browser-terminal-test-hook 'resize-terminal-updated)
   (mouse-encoder-set-size! (browser-session-mouse-encoder session) geometry)
   (set-box! (browser-session-geometry session) geometry)
-  (when (terminal-mode-enabled? (browser-session-terminal session)
-                                (hash-ref terminal-modes 'in-band-resize))
+  (when (and (not finished?)
+             (terminal-mode-enabled? (browser-session-terminal session)
+                                     (hash-ref terminal-modes 'in-band-resize)))
     (write-pty-input! session (size-report-encode 'mode-2048 rows columns cell-width cell-height)))
   (signal-change! session 'changed)
   'resize)
@@ -681,52 +723,115 @@
   (string-append "data:image/png;base64,"
                  (bytes->string/utf-8 (base64-encode (get-output-bytes output) #""))))
 
-(define (kitty-placement-xexpr placement images cell-width-px cell-height-px)
+(struct renderable-kitty-placement (index placement image info viewport source) #:authentic)
+
+(define (placement->renderable index placement images)
   (define info (kitty-graphics-placement-render-info placement))
   (define viewport (kitty-graphics-render-info-viewport info))
   (define image (hash-ref images (kitty-graphics-placement-image-id placement)))
   (define source (kitty-graphics-render-info-source-rectangle info))
-  (and
-   (eq? (kitty-graphics-placement-layer placement) 'above-text)
-   (not (kitty-graphics-placement-virtual? placement))
-   viewport
-   (kitty-graphics-image-pixels image)
-   (positive? (kitty-graphics-source-rectangle-width source))
-   (positive? (kitty-graphics-source-rectangle-height source))
-   (positive? (kitty-graphics-render-info-pixel-width info))
-   (positive? (kitty-graphics-render-info-pixel-height info))
-   `(img ((class "kitty-image above-text")
-          (alt "")
-          (data-image-id ,(number->string (kitty-graphics-placement-image-id placement)))
-          (data-placement-id ,(number->string (kitty-graphics-placement-placement-id placement)))
-          (data-z ,(number->string (kitty-graphics-placement-z placement)))
-          (data-viewport-column ,(number->string (kitty-graphics-viewport-position-column viewport)))
-          (data-viewport-row ,(number->string (kitty-graphics-viewport-position-row viewport)))
-          (data-source-x ,(number->string (kitty-graphics-source-rectangle-x source)))
-          (data-source-y ,(number->string (kitty-graphics-source-rectangle-y source)))
-          (data-source-width ,(number->string (kitty-graphics-source-rectangle-width source)))
-          (data-source-height ,(number->string (kitty-graphics-source-rectangle-height source)))
-          (data-pixel-width ,(number->string (kitty-graphics-render-info-pixel-width info)))
-          (data-pixel-height ,(number->string (kitty-graphics-render-info-pixel-height info)))
-          (draggable "false")
-          (src ,(image-png-data-url image source))
-          (style ,(format "left:~apx;top:~apx;width:~apx;height:~apx"
-                          (+ (* (kitty-graphics-viewport-position-column viewport) cell-width-px)
-                             (kitty-graphics-placement-x-offset placement))
-                          (+ (* (kitty-graphics-viewport-position-row viewport) cell-height-px)
-                             (kitty-graphics-placement-y-offset placement))
-                          (kitty-graphics-render-info-pixel-width info)
-                          (kitty-graphics-render-info-pixel-height info)))))))
+  (and (eq? (kitty-graphics-placement-layer placement) 'above-text)
+       (not (kitty-graphics-placement-virtual? placement))
+       viewport
+       (kitty-graphics-image-pixels image)
+       (positive? (kitty-graphics-source-rectangle-width source))
+       (positive? (kitty-graphics-source-rectangle-height source))
+       (positive? (kitty-graphics-render-info-pixel-width info))
+       (positive? (kitty-graphics-render-info-pixel-height info))
+       (renderable-kitty-placement index placement image info viewport source)))
+
+(define (renderable-placement<? left right)
+  (define left-placement (renderable-kitty-placement-placement left))
+  (define right-placement (renderable-kitty-placement-placement right))
+  (define left-z (kitty-graphics-placement-z left-placement))
+  (define right-z (kitty-graphics-placement-z right-placement))
+  (or (< left-z right-z)
+      (and (= left-z right-z)
+           (< (renderable-kitty-placement-index left) (renderable-kitty-placement-index right)))))
+
+(define (placement-encoding-key renderable)
+  (define placement (renderable-kitty-placement-placement renderable))
+  (define image (renderable-kitty-placement-image renderable))
+  (define source (renderable-kitty-placement-source renderable))
+  (list (kitty-graphics-placement-image-id placement)
+        (kitty-graphics-image-generation image)
+        (kitty-graphics-source-rectangle-x source)
+        (kitty-graphics-source-rectangle-y source)
+        (kitty-graphics-source-rectangle-width source)
+        (kitty-graphics-source-rectangle-height source)))
+
+(define (renderable-placement-xexpr renderable data-url cell-width-px cell-height-px)
+  (define placement (renderable-kitty-placement-placement renderable))
+  (define info (renderable-kitty-placement-info renderable))
+  (define viewport (renderable-kitty-placement-viewport renderable))
+  (define source (renderable-kitty-placement-source renderable))
+  `(img ((class "kitty-image above-text")
+         (alt "")
+         (data-image-id ,(number->string (kitty-graphics-placement-image-id placement)))
+         (data-placement-id ,(number->string (kitty-graphics-placement-placement-id placement)))
+         (data-z ,(number->string (kitty-graphics-placement-z placement)))
+         (data-viewport-column ,(number->string (kitty-graphics-viewport-position-column viewport)))
+         (data-viewport-row ,(number->string (kitty-graphics-viewport-position-row viewport)))
+         (data-source-x ,(number->string (kitty-graphics-source-rectangle-x source)))
+         (data-source-y ,(number->string (kitty-graphics-source-rectangle-y source)))
+         (data-source-width ,(number->string (kitty-graphics-source-rectangle-width source)))
+         (data-source-height ,(number->string (kitty-graphics-source-rectangle-height source)))
+         (data-pixel-width ,(number->string (kitty-graphics-render-info-pixel-width info)))
+         (data-pixel-height ,(number->string (kitty-graphics-render-info-pixel-height info)))
+         (draggable "false")
+         (src ,data-url)
+         (style ,(format "left:~apx;top:~apx;width:~apx;height:~apx"
+                         (+ (* (kitty-graphics-viewport-position-column viewport) cell-width-px)
+                            (kitty-graphics-placement-x-offset placement))
+                         (+ (* (kitty-graphics-viewport-position-row viewport) cell-height-px)
+                            (kitty-graphics-placement-y-offset placement))
+                         (kitty-graphics-render-info-pixel-width info)
+                         (kitty-graphics-render-info-pixel-height info))))))
 
 (define (kitty-images-xexprs graphics cell-width-px cell-height-px)
-  (if graphics
-      (filter values
-              (for/list ([placement (in-vector (kitty-graphics-snapshot-placements graphics))])
-                (kitty-placement-xexpr placement
-                                       (kitty-graphics-snapshot-images graphics)
-                                       cell-width-px
-                                       cell-height-px)))
-      '()))
+  (cond
+    [(not graphics) '()]
+    [else
+     (define images (kitty-graphics-snapshot-images graphics))
+     (define renderables
+       (sort (filter values
+                     (for/list ([placement (in-vector (kitty-graphics-snapshot-placements graphics))]
+                                [index (in-naturals)])
+                       (placement->renderable index placement images)))
+             renderable-placement<?))
+     (define placement-limit (current-browser-kitty-render-placement-limit))
+     (define source-pixel-limit (current-browser-kitty-render-source-pixel-limit))
+     (define encoded-byte-limit (current-browser-kitty-render-encoded-byte-limit))
+     (define encoding-cache (make-hash))
+     (define emitted 0)
+     (define source-pixels 0)
+     (define encoded-bytes 0)
+     (reverse
+      (for/fold ([output '()]) ([renderable (in-list renderables)])
+        (define source (renderable-kitty-placement-source renderable))
+        (define placement-pixels
+          (* (kitty-graphics-source-rectangle-width source)
+             (kitty-graphics-source-rectangle-height source)))
+        (cond
+          [(or (>= emitted placement-limit) (> (+ source-pixels placement-pixels) source-pixel-limit))
+           output]
+          [else
+           (define key (placement-encoding-key renderable))
+           (define cached-data-url (hash-ref encoding-cache key #f))
+           (define data-url
+             (or cached-data-url
+                 (image-png-data-url (renderable-kitty-placement-image renderable) source)))
+           (define data-url-length (string-length data-url))
+           (cond
+             [(> (+ encoded-bytes data-url-length) encoded-byte-limit) output]
+             [else
+              (unless cached-data-url
+                (hash-set! encoding-cache key data-url))
+              (set! emitted (add1 emitted))
+              (set! source-pixels (+ source-pixels placement-pixels))
+              (set! encoded-bytes (+ encoded-bytes data-url-length))
+              (cons (renderable-placement-xexpr renderable data-url cell-width-px cell-height-px)
+                    output)])])))]))
 
 (define (cell-style-css cell colors)
   (define style (render-cell-style cell))
@@ -795,41 +900,59 @@
   (define colors (render-snapshot-colors snapshot))
   (define cursor (render-snapshot-cursor snapshot))
   (define viewport (render-cursor-viewport cursor))
-  `(section ((id "terminal")
-             (data-dirty ,(symbol->string (render-snapshot-dirty snapshot)))
-             (data-cursor-style ,(symbol->string (render-cursor-style cursor)))
-             (data-cursor-visible ,(if (render-cursor-visible? cursor) "true" "false"))
-             (data-cursor-blinking ,(if (render-cursor-blinking? cursor) "true" "false"))
-             (data-cursor-password ,(if (render-cursor-password-input? cursor) "true" "false"))
-             (data-cursor-x ,(if viewport
-                                 (number->string (render-viewport-x viewport))
-                                 ""))
-             (data-cursor-y ,(if viewport
-                                 (number->string (render-viewport-y viewport))
-                                 ""))
-             (data-cursor-wide-tail
-              ,(if (and viewport (render-viewport-wide-tail? viewport)) "true" "false")))
-            (h2 "Immutable render snapshot PTY workflow")
-            (div ((id "terminal-output") (class "terminal-viewport"))
-                 ,@(for/list ([row (in-vector (render-snapshot-row-data snapshot))])
-                     (row-xexpr row colors cursor))
-                 ,@(kitty-images-xexprs (render-snapshot-kitty-graphics snapshot)
-                                        cell-width-px
-                                        cell-height-px))))
+  `(section
+    ((id "terminal")
+     (data-columns ,(number->string (render-snapshot-columns snapshot)))
+     (data-rows ,(number->string (render-snapshot-rows snapshot)))
+     (data-dirty ,(symbol->string (render-snapshot-dirty snapshot)))
+     (data-kitty-placement-limit ,(number->string (current-browser-kitty-render-placement-limit)))
+     (data-kitty-source-pixel-limit
+      ,(number->string (current-browser-kitty-render-source-pixel-limit)))
+     (data-kitty-encoded-byte-limit
+      ,(number->string (current-browser-kitty-render-encoded-byte-limit)))
+     (data-cursor-style ,(symbol->string (render-cursor-style cursor)))
+     (data-cursor-visible ,(if (render-cursor-visible? cursor) "true" "false"))
+     (data-cursor-blinking ,(if (render-cursor-blinking? cursor) "true" "false"))
+     (data-cursor-password ,(if (render-cursor-password-input? cursor) "true" "false"))
+     (data-cursor-x ,(if viewport
+                         (number->string (render-viewport-x viewport))
+                         ""))
+     (data-cursor-y ,(if viewport
+                         (number->string (render-viewport-y viewport))
+                         ""))
+     (data-cursor-wide-tail
+      ,(if (and viewport (render-viewport-wide-tail? viewport)) "true" "false")))
+    (h2 "Immutable render snapshot PTY workflow")
+    (div
+     ((id "terminal-output") (class "terminal-viewport")
+                             (style ,(format "--terminal-cell-width:~apx;--terminal-cell-height:~apx"
+                                             cell-width-px
+                                             cell-height-px)))
+     ,@(for/list ([row (in-vector (render-snapshot-row-data snapshot))])
+         (row-xexpr row colors cursor))
+     ,@(kitty-images-xexprs (render-snapshot-kitty-graphics snapshot) cell-width-px cell-height-px))))
 
 (define (terminal-xexpr session)
-  (define geometry (unbox (browser-session-geometry session)))
+  (define-values (snapshot geometry bell-count pty-reply-count)
+    (call-with-semaphore (browser-session-state-lock session)
+                         (lambda ()
+                           (values (terminal-render-snapshot (browser-session-terminal session))
+                                   (unbox (browser-session-geometry session))
+                                   (unbox (browser-session-bell-total session))
+                                   (length (unbox (browser-session-pty-reply-log session)))))))
   (define rendered
-    (render-snapshot-xexpr (browser-session-snapshot session)
+    (render-snapshot-xexpr snapshot
                            #:cell-width-px (mouse-encoder-size-cell-width geometry)
                            #:cell-height-px (mouse-encoder-size-cell-height geometry)))
   (define attributes (cadr rendered))
   (define extended
     (append attributes
-            (list `(data-bell-count ,(number->string (browser-session-bell-count session)))
-                  `(data-pty-reply-count ,(number->string (vector-length (browser-session-pty-replies
-                                                                          session)))))))
+            (list `(data-bell-count ,(number->string bell-count))
+                  `(data-pty-reply-count ,(number->string pty-reply-count)))))
   (cons (car rendered) (cons extended (cddr rendered))))
+
+(define (browser-session-render-xexpr session)
+  (terminal-xexpr session))
 
 (define (page-xexpr session)
   `(html (head (meta ((charset "utf-8")))
@@ -896,3 +1019,8 @@
             (stop)
             (browser-session-close! session))
           session))
+
+(module+ test-support
+  (provide browser-session-render-xexpr
+           call-with-browser-kitty-render-limits
+           call-with-browser-terminal-test-hook))

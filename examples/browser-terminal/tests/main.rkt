@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require browser-terminal/app
+         (submod browser-terminal/app test-support)
          json
          libghostty
          net/base64
@@ -9,6 +10,7 @@
          racket/class
          racket/draw
          racket/file
+         racket/list
          racket/path
          racket/port
          racket/string
@@ -165,6 +167,7 @@
                               #:placement-id [placement-id image-id]
                               #:virtual? [virtual? #f]
                               #:layer [layer 'above-text]
+                              #:z [z (if (eq? layer 'above-text) 0 -1)]
                               #:viewport [viewport (kitty-graphics-viewport-position 2 3)]
                               #:source [source (kitty-graphics-source-rectangle 0 0 1 1)]
                               #:x-offset [x-offset 4]
@@ -176,7 +179,7 @@
                             virtual?
                             x-offset
                             y-offset
-                            (if (eq? layer 'above-text) 0 -1)
+                            z
                             layer
                             (kitty-graphics-render-info pixel-width pixel-height 1 1 viewport source)
                             #f))
@@ -199,11 +202,69 @@
   (send bitmap get-argb-pixels x y 1 1 pixels)
   (values (send bitmap get-width) (send bitmap get-height) (bytes->list pixels)))
 
+(define (xexpr-elements tag value)
+  (cond
+    [(not (pair? value)) '()]
+    [(eq? (car value) tag) (list value)]
+    [else (append-map (lambda (item) (xexpr-elements tag item)) value)]))
+
+(define (xexpr-attribute element name)
+  (define attribute (assoc name (cadr element)))
+  (and attribute (cadr attribute)))
+
+(define (resize-command sequence
+                        #:screen-width [screen-width 810]
+                        #:screen-height [screen-height 480]
+                        #:cell-width [cell-width 10]
+                        #:cell-height [cell-height 20])
+  (hash 'sequence
+        sequence
+        'type
+        "resize"
+        'screen-width
+        screen-width
+        'screen-height
+        screen-height
+        'cell-width
+        cell-width
+        'cell-height
+        cell-height
+        'padding-top
+        0
+        'padding-bottom
+        0
+        'padding-right
+        0
+        'padding-left
+        0))
+
+(define (stop-worker! worker)
+  (when worker
+    (unless (sync/timeout 2 (thread-dead-evt worker))
+      (kill-thread worker))
+    (unless (sync/timeout 10 (thread-dead-evt worker))
+      (error 'browser-terminal-test "worker did not terminate"))))
+
+(define (run-cleanups! . cleanups)
+  (define first-error #f)
+  (parameterize-break #f
+                      (for ([cleanup (in-list cleanups)])
+                        (with-handlers ([exn? (lambda (error)
+                                                (unless first-error
+                                                  (set! first-error error)))])
+                          (cleanup))))
+  (when first-error
+    (raise first-error)))
+
 (test-case "snapshot xexpr preserves cell geometry and wide-tail cursor policy"
   (define wide-tail-html (xexpr->string (render-snapshot-xexpr (test-snapshot 1 #t))))
   (check-true (string-contains? wide-tail-html "class=\"terminal-cell cursor wide\""))
   (check-false (string-contains? wide-tail-html "data-x=\"1\""))
   (check-true (string-contains? wide-tail-html "data-width=\"2\""))
+  (check-true (string-contains? wide-tail-html
+                                "--terminal-cell-width:10px;--terminal-cell-height:20px"))
+  (check-true (string-contains? wide-tail-html "data-columns=\"4\""))
+  (check-true (string-contains? wide-tail-html "data-rows=\"1\""))
   (check-true (string-contains? wide-tail-html "class=\"terminal-cell placeholder selected narrow\""))
   (check-true (string-contains? wide-tail-html "background-color:rgb(1 2 3)"))
   (check-true (string-contains? wide-tail-html "class=\"terminal-cell placeholder spacer-head\""))
@@ -263,6 +324,40 @@
   (check-true (string-contains? html "data-image-id=\"1\""))
   (for ([image-id (in-list '(2 3 4 5))])
     (check-false (string-contains? html (format "data-image-id=\"~a\"" image-id)))))
+
+(test-case "above-text placement order encoding cache and output budgets are deterministic"
+  (define image (test-kitty-image 1 'rgb 1 1 (bytes 10 20 30)))
+  (define placements
+    (list (test-kitty-placement 1 #:placement-id 10 #:z 5)
+          (test-kitty-placement 1 #:placement-id 11 #:z 1)
+          (test-kitty-placement 1 #:placement-id 12 #:z 5)
+          (test-kitty-placement 1 #:placement-id 13 #:z 3)))
+  (define snapshot (test-snapshot 0 #f (test-kitty-graphics placements (list image))))
+  (define rendered (render-snapshot-xexpr snapshot))
+  (define image-elements (xexpr-elements 'img rendered))
+  (check-equal? (map (lambda (element) (string->number (xexpr-attribute element 'data-placement-id)))
+                     image-elements)
+                '(11 13 10 12))
+  (define data-urls (map (lambda (element) (xexpr-attribute element 'src)) image-elements))
+  (for ([data-url (in-list (cdr data-urls))])
+    (check-eq? data-url (car data-urls)))
+  (define production-html (xexpr->string rendered))
+  (check-true (string-contains? production-html "data-kitty-placement-limit=\"64\""))
+  (check-true (string-contains? production-html "data-kitty-source-pixel-limit=\"65536\""))
+  (check-true (string-contains? production-html "data-kitty-encoded-byte-limit=\"524288\""))
+  (define placement-limited
+    (call-with-browser-kitty-render-limits 2 10 1000000 (lambda () (render-snapshot-xexpr snapshot))))
+  (check-equal? (length (xexpr-elements 'img placement-limited)) 2)
+  (define source-limited
+    (call-with-browser-kitty-render-limits 10 1 1000000 (lambda () (render-snapshot-xexpr snapshot))))
+  (check-equal? (length (xexpr-elements 'img source-limited)) 1)
+  (define one-url-length (string-length (car data-urls)))
+  (define encoded-limited
+    (call-with-browser-kitty-render-limits 10
+                                           10
+                                           (sub1 (* 2 one-url-length))
+                                           (lambda () (render-snapshot-xexpr snapshot))))
+  (check-equal? (length (xexpr-elements 'img encoded-limited)) 1))
 
 (test-case "browser adapter sends facts only"
   (define source
@@ -338,6 +433,110 @@
                    session
                    (hash 'sequence 5 'type "key" 'action "release" 'code "KeyA" 'text "a")))))
    (lambda () (browser-session-close! session))))
+
+(test-case "resize remains usable after the bounded PTY has finished"
+  (define-values (_app direct-session) (make-browser-terminal-app))
+  (dynamic-wind void
+                (lambda ()
+                  (browser-session-wait direct-session 10)
+                  (check-equal? (browser-session-handle-command! direct-session
+                                                                 (resize-command 1
+                                                                                 #:screen-width 205.4
+                                                                                 #:screen-height 101.4
+                                                                                 #:cell-width 9.6
+                                                                                 #:cell-height 15.6))
+                                'resize)
+                  (define direct-snapshot (browser-session-snapshot direct-session))
+                  (check-equal? (render-snapshot-columns direct-snapshot) 21)
+                  (check-equal? (render-snapshot-rows direct-snapshot) 6)
+                  (check-equal? (browser-session-handle-command! direct-session (resize-command 2))
+                                'resize))
+                (lambda () (browser-session-close! direct-session)))
+  (define custodian (make-custodian))
+  (define port (unused-port))
+  (define stop #f)
+  (define session #f)
+  (dynamic-wind
+   (lambda ()
+     (parameterize ([current-custodian custodian])
+       (define-values (new-stop new-session) (serve-browser-terminal #:port port))
+       (set! stop new-stop)
+       (set! session new-session)))
+   (lambda ()
+     (browser-session-wait session 10)
+     (check-regexp-match #rx" 204 "
+                         (http-post-command port
+                                            (resize-command 1
+                                                            #:screen-width 205.4
+                                                            #:screen-height 101.4
+                                                            #:cell-width 9.6
+                                                            #:cell-height 15.6)))
+     (check-regexp-match #rx" 204 " (http-post-command port (resize-command 2)))
+     (define page (bounded-http-get port "/"))
+     (check-true (string-contains? page "--terminal-cell-width:10px;--terminal-cell-height:20px")))
+   (lambda ()
+     (when stop
+       (with-handlers ([exn:fail? void])
+         (stop)))
+     (custodian-shutdown-all custodian))))
+
+(test-case "page and SSE patch capture resized terminal and cell geometry together"
+  (define-values (_app session) (make-browser-terminal-app))
+  (define resize-entered (make-semaphore 0))
+  (define resize-release (make-semaphore 0))
+  (define released? #f)
+  (define resize-result (make-channel))
+  (define render-result (make-channel))
+  (define resize-worker #f)
+  (define render-worker #f)
+  (define (release-resize!)
+    (unless released?
+      (set! released? #t)
+      (semaphore-post resize-release)))
+  (dynamic-wind
+   void
+   (lambda ()
+     (browser-session-wait session 10)
+     (set! resize-worker
+           (thread (lambda ()
+                     (with-handlers ([exn? (lambda (error) (channel-put resize-result error))])
+                       (call-with-browser-terminal-test-hook
+                        (lambda (phase)
+                          (when (eq? phase 'resize-terminal-updated)
+                            (semaphore-post resize-entered)
+                            (unless (sync/timeout 10 resize-release)
+                              (error 'resize-rendezvous "timed out waiting for release"))))
+                        (lambda ()
+                          (channel-put resize-result
+                                       (browser-session-handle-command!
+                                        session
+                                        (resize-command 1
+                                                        #:screen-width 205.4
+                                                        #:screen-height 101.4
+                                                        #:cell-width 9.6
+                                                        #:cell-height 15.6)))))))))
+     (check-not-false (sync/timeout 10 resize-entered))
+     (set! render-worker
+           (thread (lambda ()
+                     (with-handlers ([exn? (lambda (error) (channel-put render-result error))])
+                       (channel-put render-result (browser-session-render-xexpr session))))))
+     (check-false (sync/timeout 0.05 render-result))
+     (release-resize!)
+     (define resize-outcome (receive-with-timeout 'resize-rendezvous resize-result 10))
+     (check-eq? resize-outcome 'resize)
+     (define rendered (receive-with-timeout 'render-rendezvous render-result 10))
+     (define html (xexpr->string rendered))
+     (check-true (string-contains? html "data-columns=\"21\""))
+     (check-true (string-contains? html "data-rows=\"6\""))
+     (check-true (string-contains? html "--terminal-cell-width:10px;--terminal-cell-height:16px"))
+     (check-true (string-contains? html "style=\"left:0px;top:0px;width:20px;height:16px\""))
+     (check-not-false (sync/timeout 10 (thread-dead-evt resize-worker)))
+     (check-not-false (sync/timeout 10 (thread-dead-evt render-worker))))
+   (lambda ()
+     (run-cleanups! release-resize!
+                    (lambda () (stop-worker! resize-worker))
+                    (lambda () (stop-worker! render-worker))
+                    (lambda () (browser-session-close! session))))))
 
 (test-case "server forwards only single printable browser key text"
   (define-values (_app session) (make-browser-terminal-app))
@@ -459,10 +658,16 @@
        (check-true (string-contains? page "Native grapheme width"))
        (check-true (regexp-match? #rx"Native grapheme width[^<]*</dt>[^<]*<dd>2</dd>" page))
        (check-true (string-contains? page "font-family:ui-monospace"))
-       (check-true (string-contains? page ".terminal-row{display:block;block-size:1lh"))
+       (check-true
+        (string-contains? page ".terminal-row{display:block;block-size:var(--terminal-cell-height)"))
        (check-true (string-contains? page ".terminal-cell{display:inline-block"))
-       (check-true (string-contains? page "inline-size:1ch;min-inline-size:1ch;block-size:1lh"))
-       (check-true (string-contains? page ".terminal-cell.wide{inline-size:2ch"))
+       (check-true
+        (string-contains?
+         page
+         "inline-size:var(--terminal-cell-width);min-inline-size:var(--terminal-cell-width)"))
+       (check-true (string-contains?
+                    page
+                    ".terminal-cell.wide{inline-size:calc(2 * var(--terminal-cell-width))"))
        (check-true (string-contains? page ".terminal-cell.selected{background-image:"))
        (check-true (string-contains? page ".terminal-cell.cursor{box-shadow:"))
        (check-true (string-contains? page "position:relative;overflow:hidden"))
